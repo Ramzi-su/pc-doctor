@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log Viewer</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside id="filters">
+    <h1>Log Viewer</h1>
+
+    <section>
+      <h2>Période</h2>
+      <select id="range">
+        <option value="10">10 dernières minutes</option>
+        <option value="60" selected>Dernière heure</option>
+        <option value="1440">24 heures</option>
+        <option value="10080">7 jours</option>
+        <option value="custom">Personnalisée…</option>
+      </select>
+      <div id="custom-range" hidden>
+        <label>Du <input type="datetime-local" id="since"></label>
+        <label>Au <input type="datetime-local" id="until"></label>
+      </div>
+    </section>
+
+    <section>
+      <h2>Criticité</h2>
+      <div id="priorities"></div>
+      <div class="row">
+        <button type="button" id="prio-errors">Erreurs seulement</button>
+        <button type="button" id="prio-all">Tout</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Logiciels <span id="ident-count"></span></h2>
+      <div class="row" id="quick-idents"></div>
+      <input type="search" id="ident-search" placeholder="Chercher un logiciel…">
+      <div id="identifiers"></div>
+      <button type="button" id="ident-clear">Tout désélectionner</button>
+    </section>
+
+    <section>
+      <h2>Recherche</h2>
+      <input type="search" id="text" placeholder="Texte dans le message" maxlength="200">
+      <label class="check"><input type="checkbox" id="crash-only"> Crashs uniquement</label>
+      <label>Max. lignes
+        <select id="limit">
+          <option>200</option><option selected>500</option>
+          <option>1000</option><option>5000</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="row">
+      <button type="button" id="refresh" class="primary">Rafraîchir</button>
+      <label class="check"><input type="checkbox" id="auto"> Auto (10 s)</label>
+    </section>
+  </aside>
+
+  <main>
+    <header id="status-bar">
+      <span id="status">Chargement…</span>
+      <span id="summary"></span>
+    </header>
+    <table>
+      <thead>
+        <tr><th>Date</th><th>Niveau</th><th>Logiciel</th><th>PID</th><th>Message</th></tr>
+      </thead>
+      <tbody id="logs"></tbody>
+    </table>
+  </main>
+</body>
+</html>
