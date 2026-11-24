@@ -1,15 +1,16 @@
 [project]
-name = "log-viewer"
+name = "pc-doctor"
 version = "0.1.0"
-description = "Local web UI to browse systemd journal logs with filters"
+description = "Local web dashboard to monitor and diagnose a Linux PC (hardware, network, ports, accounts, permissions, logs)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
+    "psutil>=7.2.2",
     "uvicorn>=0.30",
 ]
 
 [project.scripts]
-log-viewer = "app.cli:main"
+pc-doctor = "app.cli:main"
 
 [build-system]
 requires = ["hatchling"]
