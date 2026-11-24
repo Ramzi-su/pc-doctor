@@ -312,3 +312,42 @@ class ActionResult(BaseModel):
 class FirewallStatus(BaseModel):
     installed: bool
     enabled: bool
+
+
+# ---------- hardware tests ----------
+
+class HwTestInfo(BaseModel):
+    id: str
+    title: str
+    description: str
+    duration_seconds: int  # estimate, shown before starting
+    tool: str | None  # better tool used when installed
+    tool_available: bool
+    install_hint: str | None  # e.g. "sudo apt install stress-ng"
+    needs_root: bool
+
+
+class HwCheck(BaseModel):
+    """One result line: "Température max : 82 °C" + its severity."""
+
+    severity: Severity
+    label: str
+    value: str
+
+
+class HwTestState(BaseModel):
+    test_id: str | None
+    status: str  # idle | running | done | failed | cancelled
+    progress: float  # 0..1
+    started: datetime | None
+    finished: datetime | None
+    log: list[str]
+    checks: list[HwCheck]
+    # Monitoring during the test, one value per second: shown as a chart.
+    series: dict[str, list[float | None]]
+
+
+class HwTests(BaseModel):
+    tests: list[HwTestInfo]
+    state: HwTestState
+    last_results: dict[str, HwTestState]

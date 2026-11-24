@@ -13,6 +13,7 @@
     <span class="brand">PC Doctor</span>
     <a href="#dashboard">Tableau de bord</a>
     <a href="#processes">Processus</a>
+    <a href="#tests">Tests</a>
     <a href="#hardware">Matériel</a>
     <a href="#network">Réseau</a>
     <a href="#ports">Ports</a>
@@ -58,6 +59,25 @@
       <span id="proc-status" class="muted"></span>
     </div>
     <table class="data" id="proc-table"></table>
+  </div>
+
+  <!-- ===== Hardware tests ===== -->
+  <div class="view" id="view-tests" hidden>
+    <p class="muted">Un test à la fois. Ferme les programmes lourds avant de lancer les tests CPU, RAM ou GPU pour des résultats fiables.</p>
+    <div class="grid" id="test-list"></div>
+    <div class="card" id="test-run" hidden>
+      <h2><span id="test-title"></span>
+        <button type="button" id="test-cancel" class="small danger">Arrêter le test</button></h2>
+      <div class="meter"><span id="test-status"></span><div class="bar"><div class="fill" id="test-progress"></div></div><span class="val" id="test-percent"></span></div>
+      <div class="grid test-charts">
+        <div><h3>Températures</h3><div id="test-chart-temp"></div></div>
+        <div><h3>Fréquence CPU</h3><div id="test-chart-freq"></div></div>
+        <div><h3>Ventilateur</h3><div id="test-chart-fan"></div></div>
+      </div>
+      <h3>Résultats</h3>
+      <ul class="findings" id="test-checks"></ul>
+      <details><summary>Journal du test</summary><pre id="test-log"></pre></details>
+    </div>
   </div>
 
   <!-- ===== Hardware ===== -->

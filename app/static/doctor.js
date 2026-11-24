@@ -181,10 +181,12 @@ class LineChart {
     });
   }
 
-  /** times: Date[]; series: [{name, color (CSS var), values: (number|null)[]}] */
-  update(times, series) {
+  /** times: Date[]; series: [{name, color (CSS var), values: (number|null)[]}]
+   *  capacity: number of x slots (default: the 2-minute live history). */
+  update(times, series, capacity = HISTORY) {
     this.times = times;
     this.series = series;
+    this.capacity = Math.max(capacity, times.length);
     this.draw();
   }
 
@@ -209,9 +211,10 @@ class LineChart {
     const H = height;
     const plotW = W - MARGIN.left - MARGIN.right;
     const plotH = H - MARGIN.top - MARGIN.bottom;
+    const cap = this.capacity ?? HISTORY;
     this.width = W;
-    this.step = plotW / (HISTORY - 1);
-    this.offset = HISTORY - n; // newest sample on the right edge
+    this.step = plotW / Math.max(cap - 1, 1);
+    this.offset = this.opts.fromLeft ? 0 : cap - n; // live: newest on the right; tests: fill from the left
     this.svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     this.svg.setAttribute("height", H);
 
@@ -228,10 +231,11 @@ class LineChart {
       nodes.push(svg("line", { class: k ? "grid" : "baseline", x1: MARGIN.left, x2: W - MARGIN.right, y1: Y(v), y2: Y(v) }));
       nodes.push(svg("text", { class: "tick", x: MARGIN.left - 6, y: Y(v) + 4, "text-anchor": "end" }, format(v)));
     }
-    for (const [i, label] of [[0, "−2 min"], [HISTORY / 2, "−1 min"], [HISTORY - 1, "maintenant"]]) {
+    const xLabels = this.opts.xLabels?.(cap) ?? [[0, "−2 min"], [HISTORY / 2, "−1 min"], [HISTORY - 1, "maintenant"]];
+    for (const [i, label] of xLabels) {
       nodes.push(svg("text", {
         class: "tick", x: MARGIN.left + i * this.step, y: H - 6,
-        "text-anchor": i === 0 ? "start" : i === HISTORY - 1 ? "end" : "middle",
+        "text-anchor": i === 0 ? "start" : i === cap - 1 ? "end" : "middle",
       }, label));
     }
 
@@ -283,8 +287,11 @@ class LineChart {
         }
       }
       const ago = Math.round((this.times[n - 1] - this.times[i]) / 1000);
+      const when = this.opts.fromLeft
+        ? `${Math.round((this.times[i] - this.times[0]) / 1000)} s après le début`
+        : ago ? `il y a ${ago} s` : "maintenant";
       this.tip.replaceChildren(
-        h("div", { class: "tip-time" }, ago ? `il y a ${ago} s` : "maintenant"),
+        h("div", { class: "tip-time" }, when),
         ...series.map((s) => h("div", { class: "tip-row" },
           h("span", { class: "key", style: { background: `var(${s.color})` } }),
           h("strong", {}, s.values[i] === null || s.values[i] === undefined ? "—" : format(s.values[i])),
@@ -642,6 +649,116 @@ views.processes = {
 };
 for (const id of ["proc-mine", "proc-kernel", "proc-tree"]) $(id).addEventListener("change", renderProcs);
 $("proc-search").addEventListener("input", renderProcs);
+
+// ===== Hardware tests =====
+
+let testCharts = null;
+let shownTest = null; // id of the run or result displayed in the panel
+
+const TEST_STATUS = {
+  running: "En cours…", done: "Terminé", failed: "Impossible", cancelled: "Arrêté", idle: "",
+};
+
+function checkList(target, checks) {
+  target.replaceChildren(...(checks.length
+    ? checks.map((c) => h("li", {},
+      h("span", { class: `sev sev-${c.severity}` }, SEV_LABEL[c.severity]),
+      h("strong", {}, c.label), h("span", {}, c.value)))
+    : [h("li", { class: "muted" }, "Les résultats apparaîtront à la fin du test.")]));
+}
+
+function testCard(t, data) {
+  const running = data.state.status === "running";
+  const last = data.last_results[t.id];
+  const worst = last?.checks.some((c) => c.severity === "critical") ? "critical"
+    : last?.checks.some((c) => c.severity === "warning") ? "warning" : last ? "ok" : null;
+  return h("div", { class: "card test-card" },
+    h("h2", {}, t.title, h("span", { class: "muted" }, `≈ ${t.duration_seconds < 60 ? `${t.duration_seconds} s` : `${Math.round(t.duration_seconds / 60)} min`}`)),
+    h("p", {}, t.description),
+    h("div", {},
+      t.tool ? (t.tool_available ? tag(`${t.tool} installé`, "green")
+        : [tag(`${t.tool} absent`, "orange"), h("code", { class: "install" }, t.install_hint)]) : null,
+      t.needs_root ? tag("mot de passe root", "blue") : null),
+    t.tool && !t.tool_available
+      ? h("p", { class: "muted" }, {
+        smart: "Indispensable pour ce test.",
+        gpu: "En attendant : seulement l'état de la carte, sans test de charge 3D.",
+      }[t.id] ?? "Un test de secours intégré sera utilisé en attendant.") : null,
+    h("div", { class: "row" },
+      h("button", {
+        type: "button", class: "primary", disabled: running,
+        onclick: async (e) => {
+          if (await runAction(`/api/hwtests/${t.id}/start`, undefined, null, e.currentTarget)) {
+            shownTest = t.id;
+            views.tests.load();
+          }
+        },
+      }, "Lancer"),
+      last ? h("button", { type: "button", onclick: () => { shownTest = t.id; renderTestPanel(data); } },
+        "Dernier résultat ", h("span", { class: `sev sev-${worst}` }, SEV_LABEL[worst])) : null));
+}
+
+function renderTestPanel(data) {
+  const live = data.state.test_id && data.state.test_id === shownTest;
+  const state = live ? data.state : data.last_results[shownTest];
+  const panel = $("test-run");
+  panel.hidden = !state;
+  if (!state) return;
+  const info = data.tests.find((t) => t.id === state.test_id);
+  $("test-title").textContent = `${info.title} — ${fmtDate(state.started)}`;
+  $("test-cancel").hidden = state.status !== "running";
+  $("test-status").textContent = TEST_STATUS[state.status];
+  $("test-progress").style.width = `${Math.round(state.progress * 100)}%`;
+  $("test-percent").textContent = `${Math.round(state.progress * 100)} %`;
+  checkList($("test-checks"), state.checks);
+  const log = $("test-log");
+  log.textContent = state.log.join("\n");
+  log.scrollTop = log.scrollHeight;
+
+  // Monitor charts: one per unit (never two scales on one axis).
+  const s = state.series;
+  const hasSeries = Object.keys(s).length > 0;
+  panel.querySelector(".test-charts").hidden = !hasSeries;
+  if (!hasSeries) return;
+  const opts = (format) => ({
+    format, fromLeft: true, height: 150,
+    xLabels: (cap) => [[0, "0 s"], [cap - 1, `${cap - 1} s`]],
+  });
+  testCharts ??= {
+    temp: new LineChart($("test-chart-temp"), { ...opts((v) => `${Math.round(v)} °C`), max: 100 }),
+    freq: new LineChart($("test-chart-freq"), opts((v) => `${Math.round(v)} MHz`)),
+    fan: new LineChart($("test-chart-fan"), { ...opts((v) => `${Math.round(v)}`), minMax: 1000 }),
+  };
+  const n = Math.max(0, ...Object.values(s).map((v) => v.length));
+  const t0 = new Date(state.started).getTime();
+  const times = Array.from({ length: n }, (_, i) => new Date(t0 + i * 1000));
+  // Running: room for the expected duration; finished: the real one.
+  const cap = state.status === "running" ? Math.max(n, info.duration_seconds) : n;
+  testCharts.temp.update(times, [
+    { name: "CPU", color: "--series-1", values: s["Temp. CPU (°C)"] ?? [] },
+    ...(s["Temp. GPU (°C)"] ? [{ name: "GPU", color: "--series-2", values: s["Temp. GPU (°C)"] }] : []),
+  ], cap);
+  testCharts.freq.update(times, [{ name: "Fréquence", color: "--series-1", values: s["Fréquence CPU (MHz)"] ?? [] }], cap);
+  testCharts.fan.update(times, [{ name: "tr/min", color: "--series-3", values: s["Ventilateur (tr/min)"] ?? [] }], cap);
+}
+
+views.tests = {
+  every: 1_000,
+  async load() {
+    try {
+      const data = await api("/api/hwtests");
+      if (data.state.status === "running") shownTest ??= data.state.test_id;
+      $("test-list").replaceChildren(...data.tests.map((t) => testCard(t, data)));
+      renderTestPanel(data);
+    } catch (err) {
+      showError($("test-list"), err);
+    }
+  },
+};
+$("test-cancel").addEventListener("click", async (e) => {
+  await runAction("/api/hwtests/cancel", undefined, null, e.currentTarget);
+  views.tests.load();
+});
 
 // ===== Hardware =====
 

@@ -4,10 +4,12 @@ Local web dashboard to monitor and diagnose a Linux PC, **as a normal user (no r
 
 | Tab | Content |
 |---|---|
-| Tableau de bord | live CPU / RAM / temperatures / GPU / network / top processes (Server-Sent Events, every 2 s) and a prioritized diagnosis |
+| Tableau de bord | status tiles and interactive charts (CPU, RAM, temperatures, network, disk, GPU; 2-minute history, every 2 s) and a prioritized diagnosis |
+| Processus | every process (search, sort, tree view) with **Arrêter** (SIGTERM) / **Forcer** (SIGKILL) |
+| Tests | CPU, RAM, disk speed + integrity, SMART, GPU, network, battery, with live temperature/frequency/fan charts |
 | Matériel | machine, BIOS, CPU, disks, partitions, battery health, GPUs (with NVIDIA details), USB devices |
 | Réseau | interfaces with their physical card (vendor, driver, firmware, PCI slot), MAC, IPs, traffic |
-| Ports | listening TCP/UDP sockets, local vs. network-exposed, owning process when visible |
+| Ports | listening sockets, owning program (root "reveal"), stop/disable the systemd service, ufw firewall block/unblock |
 | Utilisateurs & groupes | accounts, admins, sensitive groups, login history |
 | Droits & SUID | permission audit of sensitive files, world-writable files, SUID/SGID scan |
 | Journal | systemd journal with filters (software, priority, time range, crashes) |
@@ -21,6 +23,22 @@ uv tool install --editable .   # once: installs the `pc-doctor` command
 pc-doctor                      # starts the server and opens the browser
 pc-doctor --port 9000 --no-browser
 ```
+
+## Optional tools (better tests)
+
+```bash
+sudo apt install stress-ng memtester glmark2
+```
+
+Without them, the CPU and RAM tests use built-in Python fallbacks and the GPU test only checks the
+card's state. Linux can only test the RAM it lends to a program: for a full RAM test use
+**memtest86+** (GRUB menu or USB key).
+
+## Root actions
+
+The server always runs as your user. Killing another user's process, revealing port owners,
+stopping a service, reading SMART data and managing ufw each open the **system password dialog**
+(polkit) for that single action; the password never goes through PC Doctor.
 
 ## What needs root (shown as "nécessite root")
 
@@ -36,8 +54,13 @@ the BIOS date is the firmware date. Some batteries report their own.
 ## Security
 
 - Bound to `127.0.0.1` only, with a Host header check (DNS rebinding), a strict CSP,
-  and a CSRF guard on the only action (SUID scan). Never bind to `0.0.0.0`: this page
+  and a CSRF guard on every action. Never bind to `0.0.0.0`: this page
   is a full map of the machine.
+- Only the user running PC Doctor can use it: the owner UID of each client connection
+  is checked in `/proc/net/tcp` (other local accounts get 403).
+- Kills go through a pidfd with a start-time check (no PID-reuse race, even while the
+  password dialog is open); root steps run fixed code that only reads kernel data.
+- The systemd units to stop are computed by the server, never sent by the page.
 - `pc-doctor` refuses to run as root.
 - External tools are called with argument lists (no shell) and timeouts.
 - Log file paths are resolved and confined to `/var/log` (path traversal).

@@ -219,3 +219,14 @@ svg.chart .dot { stroke: var(--panel); stroke-width: 2; }
 .tip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .tip-row strong { font-variant-numeric: tabular-nums; }
 .hint { margin-top: 12px; font-size: 12px; }
+
+/* ===== Hardware tests ===== */
+.test-card p { margin: 6px 0; }
+.test-card .row { margin-top: 10px; }
+.test-card h2 .muted { font-size: 12px; }
+code.install { display: inline-block; margin: 2px 4px; padding: 1px 6px; border-radius: 4px; background: var(--track); user-select: all; }
+#test-run { margin-top: 14px; }
+#test-run .meter { grid-template-columns: 110px 1fr 60px; margin: 10px 0; }
+.test-charts { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); margin-bottom: 10px; }
+.test-charts[hidden] { display: none; }
+#test-log { max-height: 260px; overflow: auto; font: 12px/1.4 ui-monospace, monospace; background: var(--bg); padding: 8px; border-radius: 6px; white-space: pre-wrap; }

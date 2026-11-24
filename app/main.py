@@ -18,11 +18,12 @@ from pydantic import BaseModel, Field
 
 from app import journal
 from app.models import LogQuery, LogResult, Priority
-from app.system import accounts, actions, doctor, hardware, live, logfiles, network, permissions, processes, procnet
+from app.system import accounts, actions, doctor, hardware, live, hwtests, logfiles, network, permissions, processes, procnet
 from app.system.models import (
     Accounts,
     ActionResult,
     FirewallStatus,
+    HwTests,
     Finding,
     Hardware,
     Interface,
@@ -329,3 +330,27 @@ async def firewall_rule(body: FirewallRuleRequest) -> ActionResult:
 @app.post("/api/firewall/enable", dependencies=[Depends(require_app_header)])
 async def firewall_enable(body: FirewallEnableRequest) -> ActionResult:
     return await _privileged(actions.firewall_enable, body.enabled)
+
+
+# ---------- hardware tests ----------
+
+@app.get("/api/hwtests")
+async def get_hwtests() -> HwTests:
+    return hwtests.test_runner.snapshot()
+
+
+@app.post("/api/hwtests/{test_id}/start", dependencies=[Depends(require_app_header)])
+async def start_hwtest(test_id: Annotated[str, PathParam(pattern=r"^[a-z]{1,20}$")]) -> HwTests:
+    try:
+        hwtests.test_runner.start(test_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Test inconnu.") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return hwtests.test_runner.snapshot()
+
+
+@app.post("/api/hwtests/cancel", dependencies=[Depends(require_app_header)])
+async def cancel_hwtest() -> HwTests:
+    hwtests.test_runner.cancel()
+    return hwtests.test_runner.snapshot()
