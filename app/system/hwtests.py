@@ -641,7 +641,7 @@ CATALOGUE = [
             "le relit, vérifie chaque octet puis le supprime. Aucune écriture directe sur le disque.",
             30, test_disk_speed, monitor=True),
     TestDef("smart", "Disque : santé SMART", "Lit le diagnostic interne du SSD : usure, réserve, erreurs. "
-            "Important après l'erreur EXT4 détectée.", 10, test_smart, "smartctl", "sudo apt install smartmontools",
+            "À lancer en priorité après une erreur de système de fichiers.", 10, test_smart, "smartctl", "sudo apt install smartmontools",
             needs_root=True),
     TestDef("gpu", "Carte graphique", "Vérifie l'état de la carte NVIDIA puis la charge en 3D (glmark2).",
             160, test_gpu, "glmark2", "sudo apt install glmark2", monitor=True, gpu_monitor=True),

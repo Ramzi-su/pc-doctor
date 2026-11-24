@@ -184,7 +184,7 @@ button:disabled { opacity: .5; cursor: wait; }
   }
 }
 #view-dashboard .grid { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); }
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-width: 0; }
 .tile-head { display: flex; align-items: center; gap: 6px; min-height: 18px; }
 .tile-label { color: var(--muted); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

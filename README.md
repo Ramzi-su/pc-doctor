@@ -15,6 +15,21 @@ Local web dashboard to monitor and diagnose a Linux PC, **as a normal user (no r
 | Journal | systemd journal with filters (software, priority, time range, crashes) |
 | Fichiers /var/log | readable text/gzip log files, filtered and followed live |
 
+
+## Screenshots
+
+![Dashboard: status tiles, diagnosis and live charts during a CPU stress test](docs/screenshots/01-dashboard.png)
+
+| | |
+|---|---|
+| ![Dark mode](docs/screenshots/02-dashboard-dark.png) Dark mode | ![Hardware tests](docs/screenshots/03-hardware-tests.png) CPU test with live temperature, frequency and fan |
+| ![Process tree](docs/screenshots/04-processes-tree.png) Every process as a tree, with stop / force actions | ![Ports and firewall](docs/screenshots/05-ports-firewall.png) Listening ports, systemd units, ufw |
+| ![Hardware](docs/screenshots/06-hardware.png) Hardware inventory | ![Network](docs/screenshots/07-network.png) Network cards and their hardware |
+| ![Permissions and SUID](docs/screenshots/08-permissions-suid.png) Sensitive file permissions and SUID audit | ![Journal](docs/screenshots/09-journal.png) systemd journal with filters |
+
+Personal data (user name, MAC and private IP addresses) is masked in these images by
+`scripts/portfolio-screenshots.mjs`, which can regenerate them.
+
 ## Install and run
 
 ```bash
