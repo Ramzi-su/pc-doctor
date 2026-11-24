@@ -1,6 +1,8 @@
-"""Command-line entry point: `log-viewer` starts the server and opens the browser."""
+"""Command-line entry point: `pc-doctor` starts the server and opens the browser."""
 
 import argparse
+import os
+import sys
 import threading
 import webbrowser
 
@@ -12,7 +14,7 @@ DEFAULT_PORT = 8765
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="log-viewer", description="Browse systemd journal logs.")
+    parser = argparse.ArgumentParser(prog="pc-doctor", description="Monitor and diagnose this PC in your browser.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port (default {DEFAULT_PORT})")
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
@@ -23,11 +25,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if os.geteuid() == 0:
+        # A web server running as root turns any bug into full control of the PC.
+        sys.exit("pc-doctor refuses to run as root: start it as your normal user.")
     url = f"http://{HOST}:{args.port}"
     if not args.no_browser:
         # Open slightly after startup so the server is ready to answer.
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    print(f"Log Viewer running on {url} (Ctrl+C to stop)")
+    print(f"PC Doctor running on {url} (Ctrl+C to stop)")
     uvicorn.run("app.main:app", host=HOST, port=args.port, log_level="warning")
 
 

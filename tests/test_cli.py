@@ -26,3 +26,10 @@ def test_main_binds_localhost_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: calls.update(kw))
     cli.main(["--no-browser"])
     assert calls["host"] == "127.0.0.1"
+
+
+def test_refuses_to_run_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **kw: pytest.fail("server started as root"))
+    with pytest.raises(SystemExit, match="root"):
+        cli.main(["--no-browser"])
