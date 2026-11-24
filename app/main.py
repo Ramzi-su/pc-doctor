@@ -172,15 +172,21 @@ _live_streams = 0
 @app.get("/api/live")
 async def live_stream(request: Request) -> StreamingResponse:
     """Server-Sent Events: one JSON snapshot every LIVE_INTERVAL_SECONDS."""
-    global _live_streams
-    if _live_streams >= MAX_LIVE_STREAMS:
+    if _live_streams >= MAX_LIVE_STREAMS:  # fast path: plain HTTP error
         raise HTTPException(status_code=429, detail="too many live views open")
-    sampler = await run_in_threadpool(live.LiveSampler)
 
     async def events() -> AsyncIterator[str]:
         global _live_streams
+        # Check and increment with no `await` in between: the event loop only
+        # switches tasks at an await, so two streams cannot both pass the check.
+        # Counting inside the generator also guarantees the `finally` below
+        # runs for every increment.
+        if _live_streams >= MAX_LIVE_STREAMS:
+            yield "event: error\ndata: too many live views open\n\n"
+            return
         _live_streams += 1
         try:
+            sampler = await run_in_threadpool(live.LiveSampler)
             await asyncio.sleep(0.5)  # rates need a time window: avoid a first "0 %" sample
             while not await request.is_disconnected():
                 snap = await run_in_threadpool(sampler.sample)

@@ -84,18 +84,30 @@ def _tail_plain(path: Path) -> tuple[list[str], bool]:
     return lines, size > MAX_PLAIN_READ
 
 
+CHUNK = 64 * 1024
+MAX_LINE = 64 * 1024  # longer "lines" are cut: no unbounded buffer
+
+
 def _tail_gzip(path: Path) -> tuple[list[str], bool]:
-    lines: deque[str] = deque(maxlen=MAX_LINES * 10)
+    """Read fixed-size decompressed chunks, so the byte cap is enforced before
+    any line is built: iterating lines would first load a whole line, and a
+    tiny .gz can hold a multi-GB line without any newline (gzip bomb)."""
+    lines: deque[bytes] = deque(maxlen=MAX_LINES * 10)
+    carry = b""
     read = 0
     truncated = False
-    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            read += len(line)
+    with gzip.open(path, "rb") as fh:
+        while chunk := fh.read(CHUNK):
+            read += len(chunk)
             if read > MAX_DECOMPRESSED:
                 truncated = True
                 break
-            lines.append(line.rstrip("\n"))
-    return list(lines), truncated
+            parts = (carry + chunk).split(b"\n")
+            carry = parts.pop()[:MAX_LINE]  # unfinished last line, bounded
+            lines.extend(part[:MAX_LINE] for part in parts)
+    if carry:
+        lines.append(carry)
+    return [line.decode("utf-8", errors="replace") for line in lines], truncated
 
 
 def read_log_file(raw_path: str, text: str = "", limit: int = 500,

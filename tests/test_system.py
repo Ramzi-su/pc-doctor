@@ -353,6 +353,25 @@ def test_nvidia_sleeping(tmp_path):
     assert not live.nvidia_sleeping(tmp_path / "empty")  # no NVIDIA GPU at all
 
 
+def test_gzip_bomb_single_huge_line_is_bounded(tmp_path, monkeypatch):
+    # 5 MB without any newline compresses to a few KB.
+    bomb = tmp_path / "bomb.log.gz"
+    with gzip.open(bomb, "wb") as fh:
+        fh.write(b"A" * 5_000_000)
+    monkeypatch.setattr(logfiles, "MAX_DECOMPRESSED", 1_000_000)
+    content = logfiles.read_log_file(str(bomb), root=tmp_path)
+    assert content.truncated
+    assert all(len(line) <= logfiles.MAX_LINE for line in content.lines)
+
+
+def test_gzip_lines_split_across_chunks(tmp_path, monkeypatch):
+    monkeypatch.setattr(logfiles, "CHUNK", 7)  # force lines to span chunks
+    f = tmp_path / "x.log.gz"
+    with gzip.open(f, "wt") as fh:
+        fh.write("first line\nsecond line\nlast")
+    assert logfiles.read_log_file(str(f), root=tmp_path).lines == ["first line", "second line", "last"]
+
+
 def test_live_sampler_produces_a_snapshot():
     sampler = live.LiveSampler(run=fake_runner("", returncode=1, stderr="no gpu"))
     snap = sampler.sample()
