@@ -65,14 +65,21 @@ def sockets(root: Path = PROC_NET) -> list[SocketEntry]:
     return entries
 
 
-def peer_uid(client_ip: str, client_port: int, server_port: int,
+def peer_uid(client_ip: str, client_port: int, server_ip: str, server_port: int,
              entries: list[SocketEntry] | None = None) -> int | None:
-    """UID owning the client end of a TCP connection to our server, or None."""
-    for e in sockets() if entries is None else entries:
-        if (e.proto == "tcp" and e.state == TCP_ESTABLISHED and e.local_port == client_port
-                and e.remote_port == server_port and _same_ip(e.local_ip, client_ip)):
-            return e.uid
-    return None
+    """UID owning the client end of a TCP connection to our server, or None.
+
+    A connection is identified by its full 4-tuple (both addresses, both
+    ports): matching fewer fields could pick another program's connection.
+    If the match is ambiguous, None (= refuse) rather than guess.
+    """
+    uids = {
+        e.uid for e in (sockets() if entries is None else entries)
+        if e.proto == "tcp" and e.state == TCP_ESTABLISHED
+        and e.local_port == client_port and _same_ip(e.local_ip, client_ip)
+        and e.remote_port == server_port and _same_ip(e.remote_ip, server_ip)
+    }
+    return uids.pop() if len(uids) == 1 else None
 
 
 def _same_ip(a: str, b: str) -> bool:

@@ -22,14 +22,22 @@ TCP_TABLE = """\
   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:223D 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242 1
    1: 0100007F:C350 0100007F:223D 01 00000000:00000000 00:00000000 00000000   112        0 4343 1
+   2: 0100007F:C351 0200007F:223D 01 00000000:00000000 00:00000000 00000000  1000        0 4444 1
 """
 
 
 def test_peer_uid_reads_the_client_end_of_the_connection():
     entries = procnet.parse_table(TCP_TABLE, "tcp")
     # client 127.0.0.1:50000 -> server port 8765 (0x223D) belongs to UID 112
-    assert procnet.peer_uid("127.0.0.1", 50000, 8765, entries) == 112
-    assert procnet.peer_uid("127.0.0.1", 50001, 8765, entries) is None
+    assert procnet.peer_uid("127.0.0.1", 50000, "127.0.0.1", 8765, entries) == 112
+    # same client port but towards 127.0.0.2: another connection, not ours
+    assert procnet.peer_uid("127.0.0.1", 50001, "127.0.0.1", 8765, entries) is None
+
+
+def test_peer_uid_refuses_ambiguous_matches():
+    entries = procnet.parse_table(TCP_TABLE, "tcp")
+    twin = procnet.SocketEntry("tcp", "127.0.0.1", 50000, "127.0.0.1", 8765, "01", 1000, 9999)
+    assert procnet.peer_uid("127.0.0.1", 50000, "127.0.0.1", 8765, [*entries, twin]) is None
 
 
 def test_peer_uid_on_a_real_connection():
@@ -38,7 +46,7 @@ def test_peer_uid_on_a_real_connection():
         server.listen()
         with socket.create_connection(server.getsockname()) as client:
             host, port = client.getsockname()
-            assert procnet.peer_uid(host, port, server.getsockname()[1]) == os.getuid()
+            assert procnet.peer_uid(host, port, *server.getsockname()) == os.getuid()
 
 
 def test_requests_from_unknown_peers_are_refused(monkeypatch):

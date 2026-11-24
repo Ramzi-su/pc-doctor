@@ -79,7 +79,7 @@ async def only_same_user(request: Request, call_next):
         client, server = request.scope.get("client"), request.scope.get("server")
         uid = None
         if client and server:
-            uid = await run_in_threadpool(procnet.peer_uid, client[0], client[1], server[1])
+            uid = await run_in_threadpool(procnet.peer_uid, client[0], client[1], server[0], server[1])
         if uid != os.getuid():
             return Response("PC Doctor only answers its own user.", status_code=403)
     return await call_next(request)
