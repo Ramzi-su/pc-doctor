@@ -201,6 +201,34 @@ class SuidScan(BaseModel):
     duration_seconds: float
 
 
+# ---------- processes ----------
+
+class ProcessDetail(BaseModel):
+    """One row of the Processus tab. A field the kernel refuses to give is
+    None (shown "nécessite root"); the process itself is never skipped."""
+
+    pid: int
+    ppid: int | None
+    name: str
+    cmdline: str | None  # None = access denied; "" = kernel thread
+    user: str | None
+    status: str | None
+    cpu_percent: float | None
+    memory_bytes: int | None
+    memory_percent: float | None
+    threads: int | None
+    nice: int | None
+    started: datetime | None
+    kernel_thread: bool
+    protected: bool  # PID 1, kernel threads, PC Doctor itself: kill refused
+
+
+class ProcessList(BaseModel):
+    processes: list[ProcessDetail]
+    total: int
+    current_user: str
+
+
 # ---------- live ----------
 
 class Temperature(BaseModel):

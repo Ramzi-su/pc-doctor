@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from app import journal
 from app.models import LogQuery, LogResult, Priority
-from app.system import accounts, doctor, hardware, live, logfiles, network, permissions
+from app.system import accounts, doctor, hardware, live, logfiles, network, permissions, processes
 from app.system.models import (
     Accounts,
     Finding,
@@ -26,6 +26,7 @@ from app.system.models import (
     LogFileContent,
     Permissions,
     Port,
+    ProcessList,
     SuidScan,
 )
 from app.system.runner import CommandError
@@ -119,6 +120,11 @@ async def get_network() -> list[Interface]:
 @app.get("/api/ports")
 async def get_ports() -> list[Port]:
     return await run_in_threadpool(network.listening_ports)
+
+
+@app.get("/api/processes")
+async def get_processes() -> ProcessList:
+    return await run_in_threadpool(processes.process_table.snapshot)
 
 
 @app.get("/api/accounts")

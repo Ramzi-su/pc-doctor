@@ -12,6 +12,7 @@ import psutil
 
 from app.system import runner
 from app.system.models import GpuLive, InterfaceRate, LiveSnapshot, ProcessInfo, Temperature
+from app.system.processes import safe_field
 from app.system.runner import CommandError
 
 NVIDIA_LIVE = "name,pci.bus_id,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw,pstate"
@@ -89,12 +90,14 @@ class LiveSampler:
             current[proc.pid] = proc
             try:
                 with proc.oneshot():  # read /proc/<pid> once for all fields
+                    mem = safe_field(proc.memory_info)
                     infos.append(ProcessInfo(
-                        pid=proc.pid, name=proc.name(), user=proc.username(),
-                        cpu_percent=proc.cpu_percent(), memory_bytes=proc.memory_info().rss,
+                        pid=proc.pid, name=safe_field(proc.name, "?"), user=safe_field(proc.username),
+                        cpu_percent=safe_field(proc.cpu_percent, 0.0),
+                        memory_bytes=mem.rss if mem else 0,
                     ))
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
+            except psutil.NoSuchProcess:
+                continue  # exited meanwhile; a refused field no longer hides a process
         self._procs = current
         infos.sort(key=lambda p: (p.cpu_percent, p.memory_bytes), reverse=True)
         return infos[:TOP_PROCESSES], len(current)

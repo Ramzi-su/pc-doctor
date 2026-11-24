@@ -12,6 +12,7 @@
   <nav id="tabs">
     <span class="brand">PC Doctor</span>
     <a href="#dashboard">Tableau de bord</a>
+    <a href="#processes">Processus</a>
     <a href="#hardware">Matériel</a>
     <a href="#network">Réseau</a>
     <a href="#ports">Ports</a>
@@ -36,10 +37,23 @@
       <div class="card"><h2>Réseau &amp; disque</h2><div id="live-io"></div></div>
       <div class="card"><h2>Système</h2><div id="live-sys"></div></div>
       <div class="card wide">
-        <h2>Processus les plus actifs <span id="proc-count" class="muted"></span></h2>
+        <h2>Processus les plus actifs <a href="#processes" id="proc-count" class="small-link"></a></h2>
         <table class="data" id="live-procs"></table>
       </div>
     </div>
+  </div>
+
+  <!-- ===== Processes ===== -->
+  <div class="view" id="view-processes" hidden>
+    <div class="toolbar">
+      <input type="search" id="proc-search" placeholder="Nom, commande, PID, utilisateur…">
+      <label class="check"><input type="checkbox" id="proc-mine"> Seulement les miens</label>
+      <label class="check"><input type="checkbox" id="proc-kernel" checked> Afficher les threads du noyau</label>
+      <label class="check"><input type="checkbox" id="proc-tree"> Vue en arbre (parent → enfants)</label>
+      <label class="check"><input type="checkbox" id="proc-pause"> Pause</label>
+      <span id="proc-status" class="muted"></span>
+    </div>
+    <table class="data" id="proc-table"></table>
   </div>
 
   <!-- ===== Hardware ===== -->

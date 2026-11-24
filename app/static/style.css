@@ -148,3 +148,10 @@ code, .mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
 #logfile-bar { display: flex; gap: 12px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--panel); }
 #logfile-bar input[type=search] { width: 260px; }
 #logfile-content { flex: 1; margin: 0; padding: 10px 14px; overflow: auto; font: 12.5px/1.45 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+
+/* ===== Processes ===== */
+table.data th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+table.data th.sortable:hover { color: var(--text); }
+table.data td.cmd { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.small-link { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--notice); }
+#proc-table td:not(:nth-child(2)):not(.cmd) { white-space: nowrap; font-variant-numeric: tabular-nums; }

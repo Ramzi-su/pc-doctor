@@ -177,7 +177,7 @@ function renderLive(s) {
     ["Mis à jour", fmtDate(s.time)],
   ]));
 
-  $("proc-count").textContent = `(${s.process_count} au total)`;
+  $("proc-count").textContent = `voir les ${s.process_count} processus →`;
   table($("live-procs"), ["PID", "Nom", "Utilisateur", "CPU", "Mémoire"],
     s.top_processes.map((p) => h("tr", {},
       h("td", {}, String(p.pid)), h("td", {}, p.name), h("td", {}, p.user ?? "—"),
@@ -214,6 +214,115 @@ views.dashboard = {
   },
 };
 $("diag-refresh").addEventListener("click", loadDiagnosis);
+
+// ===== Processes =====
+
+let procData = null;
+let procSort = { key: "cpu_percent", desc: true };
+
+const PROC_COLUMNS = [
+  // [label, sort key, value used for sorting]
+  ["PID", "pid", (p) => p.pid],
+  ["Nom", "name", (p) => p.name.toLowerCase()],
+  ["Utilisateur", "user", (p) => p.user ?? ""],
+  ["CPU", "cpu_percent", (p) => p.cpu_percent ?? -1],
+  ["Mémoire", "memory_bytes", (p) => p.memory_bytes ?? -1],
+  ["Threads", "threads", (p) => p.threads ?? -1],
+  ["État", "status", (p) => p.status ?? ""],
+  ["Lancé", "started", (p) => p.started ?? ""],
+  ["Commande", "cmdline", (p) => p.cmdline ?? ""],
+];
+
+const denied = () => h("span", { class: "tag" }, "nécessite root");
+const orDenied = (value, fmt = String) => (value === null || value === undefined ? denied() : fmt(value));
+
+function sortProcs(list) {
+  const get = PROC_COLUMNS.find((c) => c[1] === procSort.key)[2];
+  const dir = procSort.desc ? -1 : 1;
+  return [...list].sort((a, b) => (get(a) < get(b) ? -dir : get(a) > get(b) ? dir : 0));
+}
+
+// Tree view: depth-first walk from the roots (processes whose parent is not
+// in the filtered list), children sorted with the current column.
+function treeOrder(list) {
+  const byPid = new Map(list.map((p) => [p.pid, p]));
+  const children = new Map();
+  for (const p of list) {
+    const parent = byPid.has(p.ppid) ? p.ppid : 0;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(p);
+  }
+  const out = [];
+  const walk = (pid, depth) => {
+    for (const child of sortProcs(children.get(pid) ?? [])) {
+      out.push([child, depth]);
+      if (child.pid !== pid) walk(child.pid, depth + 1);
+    }
+  };
+  walk(0, 0);
+  return out;
+}
+
+function procRow(p, depth = 0) {
+  return h("tr", { class: p.status === "zombie" ? "warn" : "" },
+    h("td", {}, String(p.pid)),
+    h("td", {}, h("span", { style: { paddingLeft: `${depth * 14}px` } }, depth ? "└ " : "", h("strong", {}, p.name)),
+      p.kernel_thread ? tag("noyau") : null,
+      p.user === procData.current_user ? tag("toi", "blue") : null),
+    h("td", {}, orDenied(p.user)),
+    h("td", {}, orDenied(p.cpu_percent, (v) => `${v.toFixed(1)} %`)),
+    h("td", {}, orDenied(p.memory_bytes, bytes)),
+    h("td", {}, orDenied(p.threads)),
+    h("td", {}, orDenied(p.status)),
+    h("td", {}, orDenied(p.started, fmtDate)),
+    h("td", { class: "mono cmd", title: p.cmdline ?? "" },
+      p.cmdline === null ? denied() : p.cmdline || h("span", { class: "muted" }, "(thread du noyau)")));
+}
+
+function renderProcs() {
+  if (!procData) return;
+  const term = $("proc-search").value.trim().toLowerCase();
+  const mine = $("proc-mine").checked;
+  const kernel = $("proc-kernel").checked;
+  const list = procData.processes.filter((p) =>
+    (!mine || p.user === procData.current_user) &&
+    (kernel || !p.kernel_thread) &&
+    (!term || [p.pid, p.name, p.user, p.cmdline].some((v) => String(v ?? "").toLowerCase().includes(term))));
+
+  const headers = PROC_COLUMNS.map(([label, key]) => h("th", {
+    class: "sortable", title: "Trier",
+    onclick: () => {
+      procSort = { key, desc: procSort.key === key ? !procSort.desc : key !== "name" && key !== "user" };
+      renderProcs();
+    },
+  }, label, procSort.key === key ? (procSort.desc ? " ▼" : " ▲") : ""));
+
+  const rows = $("proc-tree").checked
+    ? treeOrder(list).map(([p, depth]) => procRow(p, depth))
+    : sortProcs(list).map((p) => procRow(p));
+
+  const target = $("proc-table");
+  target.replaceChildren(
+    h("thead", {}, h("tr", {}, headers)),
+    h("tbody", {}, rows.length ? rows : h("tr", {}, h("td", { colSpan: PROC_COLUMNS.length, class: "muted" }, "Aucun processus ne correspond"))),
+  );
+  $("proc-status").textContent = `${list.length} affichés sur ${procData.total}`;
+}
+
+views.processes = {
+  every: 3_000,
+  async load() {
+    if ($("proc-pause").checked && procData) return;
+    try {
+      procData = await api("/api/processes");
+      renderProcs();
+    } catch (err) {
+      showError($("proc-table"), err);
+    }
+  },
+};
+for (const id of ["proc-mine", "proc-kernel", "proc-tree"]) $(id).addEventListener("change", renderProcs);
+$("proc-search").addEventListener("input", renderProcs);
 
 // ===== Hardware =====
 
