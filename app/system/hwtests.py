@@ -11,6 +11,7 @@ user's home and always deletes it.
 """
 
 import json
+import mmap
 import os
 import re
 import shutil
@@ -389,20 +390,7 @@ def test_disk_speed(ctx: Context, size: int = 1024 * MIB, folder: Path | None = 
         write_speed = size / (time.monotonic() - t0)
 
         ctx.log("Relecture et vérification")
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            # Drop our file from the page cache, otherwise we would measure RAM.
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-            t0 = time.monotonic()
-            corrupted = 0
-            for i in range(count):
-                ctx.check_cancel()
-                if os.read(fd, chunk) != block(i):
-                    corrupted += 1
-                ctx.progress(0.5 + 0.5 * i / count)
-            read_speed = size / (time.monotonic() - t0)
-        finally:
-            os.close(fd)
+        read_speed, corrupted = _read_back(ctx, path, count, chunk, block)
     finally:
         path.unlink(missing_ok=True)
 
@@ -413,6 +401,47 @@ def test_disk_speed(ctx: Context, size: int = 1024 * MIB, folder: Path | None = 
                 f"{speed / MIB:.0f} Mo/s" + (" : lent pour ce type de disque" if speed < slow else ""))
     ctx.add(Severity.CRITICAL if corrupted else Severity.OK, "Intégrité des données",
             f"{corrupted} bloc(s) relu(s) différent(s) de ce qui a été écrit" if corrupted else "relu à l'identique")
+
+
+def _open_direct(path: Path) -> tuple[int, bool]:
+    """Open for reading with O_DIRECT (bypasses the page cache, like dd
+    iflag=direct) when the filesystem allows it; tmpfs, for one, does not."""
+    try:
+        return os.open(path, os.O_RDONLY | os.O_DIRECT), True
+    except OSError:
+        return os.open(path, os.O_RDONLY), False
+
+
+def _read_back(ctx: Context, path: Path, count: int, chunk: int,
+               block: Callable[[int], bytes]) -> tuple[float, int]:
+    """Read the file back in big chunks; returns (bytes/s, corrupted chunks).
+
+    With O_DIRECT each read goes straight to the disk in one large request,
+    as dd does; buffered reads would be split into small read-ahead requests
+    and measure the kernel more than the SSD. O_DIRECT needs a memory buffer
+    aligned on the block size: an anonymous mmap is page-aligned.
+    Only the reads are timed, not the verification.
+    """
+    fd, direct = _open_direct(path)
+    buf = mmap.mmap(-1, chunk)
+    try:
+        if not direct:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)  # else we would measure RAM
+        elapsed = 0.0
+        corrupted = 0
+        for i in range(count):
+            ctx.check_cancel()
+            t0 = time.monotonic()
+            n = os.readv(fd, [buf])
+            elapsed += time.monotonic() - t0
+            if n != chunk or buf[:] != block(i):
+                corrupted += 1
+            ctx.progress(0.5 + 0.5 * i / count)
+        ctx.log("Lecture directe (O_DIRECT)" if direct else "Lecture via le cache (O_DIRECT non géré ici)")
+        return count * chunk / max(elapsed, 1e-6), corrupted
+    finally:
+        buf.close()
+        os.close(fd)
 
 
 def root_disk(sys_root: Path = SYS) -> str | None:

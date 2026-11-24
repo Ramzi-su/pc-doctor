@@ -206,3 +206,15 @@ def test_monitor_keeps_one_slot_per_second():
     monitor.stop.set()
     monitor.join()
     assert 2 <= len(state.series["Temp. CPU (°C)"]) <= 4
+
+
+@pytest.mark.parametrize("direct_supported", [True, False])
+def test_disk_read_back_with_and_without_o_direct(tmp_path, monkeypatch, direct_supported):
+    if not direct_supported:
+        def no_direct(path):
+            return hwtests.os.open(path, hwtests.os.O_RDONLY), False
+        monkeypatch.setattr(hwtests, "_open_direct", no_direct)
+    ctx = new_ctx()
+    hwtests.test_disk_speed(ctx, size=32 * hwtests.MIB, folder=tmp_path)
+    assert severities(ctx)["Intégrité des données"] == Severity.OK
+    assert list(tmp_path.iterdir()) == []
