@@ -16,6 +16,18 @@ from app.system.models import ProcessDetail, ProcessList
 
 KTHREADD_PID = 2  # parent of every kernel thread
 
+# Killing one of these ends the graphical session or cuts the network/sound:
+# allowed, but the UI asks for an explicit confirmation.
+CRITICAL_NAMES = frozenset({
+    "gnome-shell", "Xorg", "Xwayland", "gdm", "gdm3", "gdm-wayland-session", "gdm-x-session",
+    "gnome-session-binary", "dbus-daemon", "dbus-broker", "NetworkManager", "wpa_supplicant",
+    "pipewire", "wireplumber", "pulseaudio", "polkitd", "sddm", "lightdm", "kwin_x11", "kwin_wayland",
+})
+
+
+def is_critical(name: str) -> bool:
+    return name in CRITICAL_NAMES or name.startswith("systemd")
+
 
 def is_protected(pid: int, ppid: int | None, own_pid: int | None = None) -> bool:
     """Processes the UI must never offer to kill.
@@ -74,10 +86,11 @@ class ProcessTable:
             mem = safe_field(proc.memory_info)
             created = safe_field(proc.create_time)
             kernel = proc.pid == KTHREADD_PID or ppid == KTHREADD_PID
+            name = safe_field(proc.name, "?")
             return ProcessDetail(
                 pid=proc.pid,
                 ppid=ppid,
-                name=safe_field(proc.name, "?"),
+                name=name,
                 cmdline=" ".join(cmdline) if cmdline is not None else None,
                 user=safe_field(proc.username),
                 status=safe_field(proc.status),
@@ -89,6 +102,7 @@ class ProcessTable:
                 started=datetime.fromtimestamp(created, timezone.utc) if created else None,
                 kernel_thread=kernel,
                 protected=is_protected(proc.pid, ppid),
+                critical=is_critical(name),
             )
 
 

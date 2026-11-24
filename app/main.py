@@ -4,10 +4,11 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParam, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -16,9 +17,11 @@ from pydantic import BaseModel, Field
 
 from app import journal
 from app.models import LogQuery, LogResult, Priority
-from app.system import accounts, doctor, hardware, live, logfiles, network, permissions, processes
+from app.system import accounts, actions, doctor, hardware, live, logfiles, network, permissions, processes
 from app.system.models import (
     Accounts,
+    ActionResult,
+    FirewallStatus,
     Finding,
     Hardware,
     Interface,
@@ -225,3 +228,80 @@ async def get_log_file(query: Annotated[LogFileQuery, Query()]) -> LogFileConten
             logfiles.read_log_file, query.path, query.text.strip(), query.limit)
     except logfiles.LogFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------- privileged actions ----------
+# Each one may open the system password dialog. One at a time: a second
+# click while a dialog is open gets 409 instead of stacking dialogs.
+
+_action_lock = asyncio.Lock()
+PID_MAX = 4_194_304  # Linux upper bound (/proc/sys/kernel/pid_max)
+
+
+async def _privileged(func, *args) -> ActionResult:
+    if _action_lock.locked():
+        raise HTTPException(status_code=409, detail="Une autre action attend déjà ton mot de passe.")
+    async with _action_lock:
+        try:
+            return await run_in_threadpool(func, *args)
+        except actions.ActionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class KillRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    started: datetime  # start time shown in the page: detects PID reuse
+    signal: actions.Signal = "TERM"
+
+
+class PortRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    protocol: actions.Protocol
+    port: int = Field(ge=1, le=65535)
+
+
+class StopServiceRequest(PortRequest):
+    disable: bool = False
+
+
+class FirewallRuleRequest(PortRequest):
+    block: bool = True
+
+
+class FirewallEnableRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool
+
+
+@app.post("/api/processes/{pid}/kill", dependencies=[Depends(require_app_header)])
+async def kill_process(pid: Annotated[int, PathParam(gt=2, le=PID_MAX)],
+                       body: KillRequest) -> ActionResult:
+    return await _privileged(actions.kill_process, pid, body.started, body.signal)
+
+
+@app.post("/api/ports/reveal", dependencies=[Depends(require_app_header)])
+async def reveal_ports() -> ActionResult:
+    return await _privileged(actions.reveal_port_owners)
+
+
+@app.post("/api/ports/stop-service", dependencies=[Depends(require_app_header)])
+async def stop_port_service(body: StopServiceRequest) -> ActionResult:
+    return await _privileged(actions.stop_port_service, body.protocol, body.port, body.disable)
+
+
+@app.get("/api/firewall")
+async def get_firewall() -> FirewallStatus:
+    return actions.firewall_status()
+
+
+@app.post("/api/firewall/rule", dependencies=[Depends(require_app_header)])
+async def firewall_rule(body: FirewallRuleRequest) -> ActionResult:
+    return await _privileged(actions.firewall_rule, body.protocol, body.port, body.block)
+
+
+@app.post("/api/firewall/enable", dependencies=[Depends(require_app_header)])
+async def firewall_enable(body: FirewallEnableRequest) -> ActionResult:
+    return await _privileged(actions.firewall_enable, body.enabled)

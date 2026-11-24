@@ -22,6 +22,7 @@
     <a href="#logfiles">Fichiers /var/log</a>
     <span id="live-dot" title="Mise à jour en direct"></span>
   </nav>
+  <div id="toast" role="status" hidden></div>
 
   <!-- ===== Dashboard ===== -->
   <div class="view" id="view-dashboard" hidden>
@@ -70,8 +71,10 @@
   <div class="view" id="view-ports" hidden>
     <div class="toolbar">
       <label class="check"><input type="checkbox" id="ports-exposed"> Seulement les ports ouverts sur le réseau</label>
-      <span class="muted">Sans root, le nom du processus n'est visible que pour tes propres programmes.</span>
+      <button type="button" id="ports-reveal" class="primary">Révéler tous les programmes (root)</button>
+      <span class="muted">Sans root, le nom du programme n'est visible que pour les tiens.</span>
     </div>
+    <div class="card firewall" id="firewall"></div>
     <table class="data" id="ports"></table>
   </div>
 

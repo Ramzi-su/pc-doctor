@@ -152,6 +152,19 @@ code, .mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
 /* ===== Processes ===== */
 table.data th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 table.data th.sortable:hover { color: var(--text); }
-table.data td.cmd { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.data td.cmd { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .small-link { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--notice); }
 #proc-table td:not(:nth-child(2)):not(.cmd) { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ===== Actions ===== */
+td.actions { white-space: nowrap; }
+td.actions button { margin: 1px 2px; }
+button.danger { border-color: var(--err); color: var(--err); }
+button:disabled { opacity: .5; cursor: wait; }
+.card.firewall { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.card.firewall button { margin-left: auto; }
+#toast {
+  position: fixed; right: 16px; bottom: 16px; z-index: 10; max-width: 460px; padding: 10px 14px;
+  border-radius: 8px; color: #fff; background: var(--notice); box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
+}
+#toast.ok { background: var(--ok); } #toast.err { background: var(--err); }

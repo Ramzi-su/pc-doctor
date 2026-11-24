@@ -32,6 +32,41 @@ async function api(url, options = {}) {
   return body;
 }
 
+// ---------- privileged actions ----------
+// Every action: explicit confirmation, then a POST carrying the custom
+// header (CSRF guard). The server may open the system password dialog, so
+// the request can take as long as the user needs to type it.
+
+let toastTimer;
+function toast(message, ok = true) {
+  const el = $("toast");
+  el.textContent = message;
+  el.className = ok === null ? "" : ok ? "ok" : "err"; // null = pending (neutral, stays shown)
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  if (ok !== null) toastTimer = setTimeout(() => { el.hidden = true; }, ok ? 5000 : 10000);
+}
+
+async function runAction(url, body, confirmText, button) {
+  if (confirmText && !confirm(confirmText)) return false;
+  if (button) button.disabled = true;
+  toast("En attente… (saisis ton mot de passe si la fenêtre système s'ouvre)", null);
+  try {
+    const res = await api(url, {
+      method: "POST",
+      headers: { "X-Requested-With": "pc-doctor", "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    toast(res.message, true);
+    return true;
+  } catch (err) {
+    toast(err.message, false);
+    return false;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 // ---------- formatting ----------
 
 const UNITS = ["o", "Ko", "Mo", "Go", "To"];
@@ -231,6 +266,7 @@ const PROC_COLUMNS = [
   ["État", "status", (p) => p.status ?? ""],
   ["Lancé", "started", (p) => p.started ?? ""],
   ["Commande", "cmdline", (p) => p.cmdline ?? ""],
+  ["Actions", null, null],
 ];
 
 const denied = () => h("span", { class: "tag" }, "nécessite root");
@@ -268,6 +304,7 @@ function procRow(p, depth = 0) {
     h("td", {}, String(p.pid)),
     h("td", {}, h("span", { style: { paddingLeft: `${depth * 14}px` } }, depth ? "└ " : "", h("strong", {}, p.name)),
       p.kernel_thread ? tag("noyau") : null,
+      p.critical ? tag("vital", "orange") : null,
       p.user === procData.current_user ? tag("toi", "blue") : null),
     h("td", {}, orDenied(p.user)),
     h("td", {}, orDenied(p.cpu_percent, (v) => `${v.toFixed(1)} %`)),
@@ -276,7 +313,30 @@ function procRow(p, depth = 0) {
     h("td", {}, orDenied(p.status)),
     h("td", {}, orDenied(p.started, fmtDate)),
     h("td", { class: "mono cmd", title: p.cmdline ?? "" },
-      p.cmdline === null ? denied() : p.cmdline || h("span", { class: "muted" }, "(thread du noyau)")));
+      p.cmdline === null ? denied() : p.cmdline || h("span", { class: "muted" }, "(thread du noyau)")),
+    h("td", { class: "actions" }, killButtons(p)));
+}
+
+function killButtons(p) {
+  if (p.protected) return h("span", { class: "muted", title: "PID 1, thread du noyau ou PC Doctor" }, "protégé");
+  if (!p.started) return denied();
+  const mine = p.user === procData.current_user;
+  const label = `${p.name} (PID ${p.pid}, utilisateur ${p.user ?? "?"})`;
+  const warning = p.critical
+    ? "\n\n⚠️ Processus VITAL : ta session graphique, le réseau ou le son peuvent s'arrêter."
+    : "";
+  const root = mine ? "" : "\n\nIl appartient à un autre utilisateur : ton mot de passe root sera demandé.";
+  const send = (signal, verb) => async (e) => {
+    const ok = await runAction(`/api/processes/${p.pid}/kill`, { started: p.started, signal },
+      `${verb} ${label} ?${warning}${root}`, e.currentTarget);
+    if (ok) setTimeout(views.processes.load, 500);
+  };
+  return [
+    h("button", { type: "button", class: "small", title: "SIGTERM : demande au programme de se fermer proprement",
+      onclick: send("TERM", "Arrêter") }, "Arrêter"),
+    h("button", { type: "button", class: "small danger", title: "SIGKILL : arrêt immédiat, sans sauvegarde",
+      onclick: send("KILL", "Forcer l'arrêt de") }, "Forcer"),
+  ];
 }
 
 function renderProcs() {
@@ -289,7 +349,7 @@ function renderProcs() {
     (kernel || !p.kernel_thread) &&
     (!term || [p.pid, p.name, p.user, p.cmdline].some((v) => String(v ?? "").toLowerCase().includes(term))));
 
-  const headers = PROC_COLUMNS.map(([label, key]) => h("th", {
+  const headers = PROC_COLUMNS.map(([label, key]) => key === null ? h("th", {}, label) : h("th", {
     class: "sortable", title: "Trier",
     onclick: () => {
       procSort = { key, desc: procSort.key === key ? !procSort.desc : key !== "name" && key !== "user" };
@@ -415,27 +475,103 @@ views.network = {
 // ===== Ports =====
 
 let portsData = [];
+let firewall = null;
+
+function portActions(p) {
+  const base = p.protocol.replace("6", "");
+  const what = `le port ${p.port}/${base}`;
+  const reload = (ok) => ok && setTimeout(views.ports.load, 500);
+  const buttons = [];
+  if (p.units.length) {
+    const units = p.units.join(" + ");
+    buttons.push(
+      h("button", { type: "button", class: "small", title: `systemctl stop ${units}`,
+        onclick: async (e) => reload(await runAction("/api/ports/stop-service", { protocol: base, port: p.port, disable: false },
+          `Arrêter ${units} pour fermer ${what} ?\n\nIl redémarrera au prochain démarrage du PC.`, e.currentTarget)) },
+        "Arrêter le service"),
+      h("button", { type: "button", class: "small danger", title: `systemctl disable --now ${units}`,
+        onclick: async (e) => reload(await runAction("/api/ports/stop-service", { protocol: base, port: p.port, disable: true },
+          `Arrêter ET désactiver ${units} ?\n\n${what} restera fermé après redémarrage. ` +
+          `Pour annuler plus tard : sudo systemctl enable --now ${units}`, e.currentTarget)) },
+        "Désactiver"));
+  } else if (p.pid && p.pid > 1 && p.started) {
+    buttons.push(h("button", { type: "button", class: "small", title: "SIGTERM au programme qui écoute",
+      onclick: async (e) => reload(await runAction(`/api/processes/${p.pid}/kill`, { started: p.started, signal: "TERM" },
+        `Arrêter ${p.process} (PID ${p.pid}) pour fermer ${what} ?`, e.currentTarget)) },
+      "Arrêter le programme"));
+  }
+  if (p.exposed && firewall?.installed) {
+    buttons.push(
+      h("button", { type: "button", class: "small", title: `ufw deny ${p.port}/${base}`,
+        onclick: async (e) => reload(await runAction("/api/firewall/rule", { protocol: base, port: p.port, block: true },
+          `Bloquer ${what} dans le pare-feu ?\n\nLe programme continue de tourner mais devient injoignable depuis le réseau.` +
+          (firewall.enabled ? "" : "\n\n⚠️ Le pare-feu est désactivé : la règle ne s'appliquera qu'après l'avoir activé."),
+          e.currentTarget)) },
+        "Bloquer"),
+      h("button", { type: "button", class: "small", title: `ufw delete deny ${p.port}/${base}`,
+        onclick: async (e) => reload(await runAction("/api/firewall/rule", { protocol: base, port: p.port, block: false },
+          `Retirer le blocage de ${what} ?`, e.currentTarget)) },
+        "Débloquer"));
+  }
+  return buttons.length ? buttons : h("span", { class: "muted" }, p.pid ? "—" : "révèle d'abord le programme");
+}
+
+function renderFirewall() {
+  const card = $("firewall");
+  if (!firewall?.installed) {
+    card.replaceChildren(h("strong", {}, "Pare-feu : "), "ufw n'est pas installé.");
+    return;
+  }
+  card.replaceChildren(
+    h("strong", {}, "Pare-feu (ufw) : "),
+    firewall.enabled ? tag("activé", "green") : tag("désactivé", "orange"),
+    h("span", { class: "muted" }, firewall.enabled
+      ? " Les connexions entrantes non autorisées sont bloquées."
+      : " Tous les ports « réseau » ci-dessous sont joignables par les autres machines."),
+    h("button", {
+      type: "button", class: firewall.enabled ? "small" : "small primary",
+      onclick: async (e) => {
+        const enable = !firewall.enabled;
+        const ok = await runAction("/api/firewall/enable", { enabled: enable }, enable
+          ? "Activer le pare-feu ?\n\nPar défaut, ufw bloque toutes les connexions ENTRANTES " +
+            "(SSH depuis une autre machine, partage réseau…) et laisse passer les sortantes " +
+            "(navigation, mises à jour). Ta navigation n'est pas affectée."
+          : "Désactiver le pare-feu ?\n\nTous les ports réseau redeviendront joignables.", e.currentTarget);
+        if (ok) views.ports.load();
+      },
+    }, firewall.enabled ? "Désactiver" : "Activer le pare-feu"),
+  );
+}
+
 function renderPorts() {
   const onlyExposed = $("ports-exposed").checked;
-  table($("ports"), ["Protocole", "Adresse", "Port", "Accès", "Service probable", "Processus", "Utilisateur"],
+  table($("ports"), ["Protocole", "Adresse", "Port", "Accès", "Service probable", "Processus", "Utilisateur", "Actions"],
     portsData.filter((p) => !onlyExposed || p.exposed).map((p) => h("tr", { class: p.exposed ? "warn" : "" },
       h("td", {}, p.protocol), h("td", { class: "mono" }, p.address), h("td", {}, String(p.port)),
       h("td", {}, p.exposed ? tag("réseau", "orange") : tag("local seulement", "green")),
-      h("td", {}, p.service ?? "—"),
-      h("td", {}, p.process ? `${p.process} (${p.pid})` : h("span", { class: "muted" }, "caché (autre utilisateur)")),
-      h("td", {}, p.user ?? "—"))));
+      h("td", {}, p.service ?? "—", p.units.length ? h("div", { class: "muted mono" }, p.units.join(", ")) : null),
+      h("td", {}, p.process
+        ? [`${p.process} (${p.pid})`, p.pid === 1 ? h("div", { class: "muted" }, "systemd écoute à la place du service") : null,
+          p.revealed ? tag("révélé en root") : null]
+        : h("span", { class: "muted" }, "caché (autre utilisateur)")),
+      h("td", {}, p.user ?? "—"),
+      h("td", { class: "actions" }, portActions(p)))));
 }
 views.ports = {
   every: 5_000,
   async load() {
     try {
-      portsData = await api("/api/ports");
+      [portsData, firewall] = await Promise.all([api("/api/ports"), api("/api/firewall")]);
+      renderFirewall();
       renderPorts();
     } catch (err) {
       showError($("ports"), err);
     }
   },
 };
+$("ports-reveal").addEventListener("click", async (e) => {
+  if (await runAction("/api/ports/reveal", undefined, null, e.currentTarget)) views.ports.load();
+});
 $("ports-exposed").addEventListener("change", renderPorts);
 
 // ===== Accounts =====

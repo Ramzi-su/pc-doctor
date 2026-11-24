@@ -1,7 +1,10 @@
 """Network interfaces (with their physical card) and listening ports."""
 
 import ipaddress
+import re
 import socket
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
@@ -110,14 +113,120 @@ def is_exposed(address: str) -> bool:
     return not (mapped and mapped.is_loopback)
 
 
-def _process(pid: int | None) -> tuple[str | None, str | None]:
+def _process(pid: int | None) -> tuple[str | None, str | None, datetime | None]:
     if pid is None:
-        return None, None
+        return None, None, None
     try:
         p = psutil.Process(pid)
-        return p.name(), p.username()
+        return p.name(), p.username(), datetime.fromtimestamp(p.create_time(), timezone.utc)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None, None
+        return None, None, None
+
+
+def normalize_address(address: str) -> str:
+    """Same spelling for psutil and ss/systemctl: no brackets, no %zone,
+    and "*" (ss: every address) folded with the IPv4/IPv6 wildcards."""
+    address = address.strip("[]").split("%")[0]
+    return "*" if address in ("*", "0.0.0.0", "::") else address
+
+
+def split_endpoint(endpoint: str) -> tuple[str, int] | None:
+    """"[::]:22" -> ("*", 22); "127.0.0.53%lo:53" -> ("127.0.0.53", 53)."""
+    address, _, port = endpoint.rpartition(":")
+    if not address or not port.isdigit():
+        return None
+    return normalize_address(address), int(port)
+
+
+def parse_list_sockets(output: str) -> dict[tuple[str, int, str], list[str]]:
+    """`systemctl list-sockets --show-types` -> {(proto, port, address): [units]}.
+
+    A socket-activated service (e.g. ssh on Ubuntu) is listened on by
+    systemd itself (PID 1): closing the port means stopping the .socket
+    unit *and* the .service it starts. No root needed to list them.
+    """
+    units: dict[tuple[str, int, str], list[str]] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[1] not in ("Stream", "Datagram"):
+            continue  # unix sockets, netlink, FIFOs...
+        endpoint = split_endpoint(parts[0])
+        if endpoint is None:
+            continue
+        proto = "tcp" if parts[1] == "Stream" else "udp"
+        names = [u for u in parts[2:] if UNIT_RE.fullmatch(u)]
+        units[(proto, endpoint[1], endpoint[0])] = names
+    return units
+
+
+UNIT_RE = re.compile(r"[A-Za-z0-9@_.:\\-]+\.(service|socket)")
+
+
+def unit_of_pid(pid: int, proc_root: Path = Path("/proc")) -> str | None:
+    """System service a process belongs to, from its cgroup (world-readable):
+    "0::/system.slice/mysql.service" -> "mysql.service". None for user apps."""
+    cgroup = read_text(proc_root / str(pid) / "cgroup") or ""
+    match = re.search(r"^0::/system\.slice/(?:.*/)?([^/]+\.service)$", cgroup, re.M)
+    return match.group(1) if match else None
+
+
+def parse_ss_owners(output: str) -> dict[tuple[str, int, str], int]:
+    """`ss -tulpnH` (as root) -> {(proto, port, address): pid}."""
+    owners = {}
+    for line in output.splitlines():
+        parts = line.split()
+        match = re.search(r'users:\(\("[^"]*",pid=(\d+)', line)
+        if len(parts) < 5 or not match or parts[0] not in ("tcp", "udp"):
+            continue
+        endpoint = split_endpoint(parts[4])
+        if endpoint:
+            owners[(parts[0], endpoint[1], endpoint[0])] = int(match.group(1))
+    return owners
+
+
+class RevealedOwners:
+    """Port owners found once with root, kept to fill later listings.
+
+    A PID can be reused by an unrelated program after the owner exits, so we
+    remember its start time and drop the entry when it no longer matches.
+    """
+
+    def __init__(self) -> None:
+        self._owners: dict[tuple[str, int, str], tuple[int, float]] = {}
+        self._lock = threading.Lock()
+
+    def update(self, owners: dict[tuple[str, int, str], int]) -> None:
+        found = {}
+        for key, pid in owners.items():
+            try:
+                found[key] = (pid, psutil.Process(pid).create_time())
+            except psutil.NoSuchProcess:
+                continue
+        with self._lock:
+            self._owners = found
+
+    def get(self, proto: str, port: int, address: str) -> int | None:
+        with self._lock:
+            entry = self._owners.get((proto, port, address))
+        if entry is None:
+            return None
+        pid, started = entry
+        try:
+            return pid if psutil.Process(pid).create_time() == started else None
+        except psutil.NoSuchProcess:
+            return None
+
+
+revealed_owners = RevealedOwners()
+
+
+def _socket_units() -> dict[tuple[str, int, str], list[str]]:
+    try:
+        return parse_list_sockets(runner.run(
+            ["systemctl", "list-sockets", "--all", "--no-legend", "--no-pager", "--show-types"],
+            timeout=5))
+    except CommandError:
+        return {}
 
 
 def listening_ports() -> list[Port]:
@@ -128,21 +237,31 @@ def listening_ports() -> list[Port]:
     """
     seen: set[tuple] = set()
     ports = []
+    socket_units = _socket_units()
     for conn in psutil.net_connections(kind="inet"):
         is_tcp = conn.type == socket.SOCK_STREAM
         if is_tcp and conn.status != psutil.CONN_LISTEN:
             continue
         if not is_tcp and conn.raddr:
             continue  # connected UDP socket, not a server
-        proto = ("tcp" if is_tcp else "udp") + ("6" if conn.family == socket.AF_INET6 else "")
+        base = "tcp" if is_tcp else "udp"
+        proto = base + ("6" if conn.family == socket.AF_INET6 else "")
         key = (proto, conn.laddr.ip, conn.laddr.port, conn.pid)
         if key in seen:
             continue
         seen.add(key)
-        name, user = _process(conn.pid)
+        endpoint = (base, conn.laddr.port, normalize_address(conn.laddr.ip))
+        pid, revealed = conn.pid, False
+        if pid is None:
+            pid = revealed_owners.get(*endpoint)
+            revealed = pid is not None
+        name, user, started = _process(pid)
+        units = socket_units.get(endpoint, [])
+        if not units and pid and pid > 1 and (unit := unit_of_pid(pid)):
+            units = [unit]
         ports.append(Port(
             protocol=proto, address=conn.laddr.ip, port=conn.laddr.port,
-            exposed=is_exposed(conn.laddr.ip), pid=conn.pid, process=name, user=user,
-            service=WELL_KNOWN_PORTS.get(conn.laddr.port),
+            exposed=is_exposed(conn.laddr.ip), pid=pid, process=name, user=user, started=started,
+            service=WELL_KNOWN_PORTS.get(conn.laddr.port), units=units, revealed=revealed,
         ))
     return sorted(ports, key=lambda p: (not p.exposed, p.port, p.protocol))

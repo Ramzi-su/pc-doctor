@@ -37,6 +37,19 @@ def run(cmd: list[str], timeout: float = DEFAULT_TIMEOUT, runner: Runner | None 
     return proc.stdout
 
 
+def run_full(cmd: list[str], timeout: float = DEFAULT_TIMEOUT,
+             runner: Runner | None = None) -> subprocess.CompletedProcess[str]:
+    """Like run() but returns the exit code too: privileged actions need it
+    to tell "password dialog cancelled" from "command failed"."""
+    runner = runner or subprocess.run
+    try:
+        return runner(cmd, capture_output=True, text=True, timeout=timeout, check=False, env=_ENV)
+    except FileNotFoundError as exc:
+        raise CommandError(f"{cmd[0]} is not installed") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CommandError(f"{cmd[0]} timed out") from exc
+
+
 ROOT_ONLY = "requires root"
 
 

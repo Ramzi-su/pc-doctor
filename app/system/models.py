@@ -130,7 +130,10 @@ class Port(BaseModel):
     pid: int | None
     process: str | None  # None when owned by another user (needs root)
     user: str | None
+    started: datetime | None = None  # owner's start time (detects PID reuse)
     service: str | None  # usual service for this port number (a hint, not proof)
+    units: list[str] = []  # systemd units to stop to close it (from the server, never the page)
+    revealed: bool = False  # owner found by the root "reveal" action
 
 
 # ---------- accounts & permissions ----------
@@ -221,6 +224,7 @@ class ProcessDetail(BaseModel):
     started: datetime | None
     kernel_thread: bool
     protected: bool  # PID 1, kernel threads, PC Doctor itself: kill refused
+    critical: bool  # killing it closes the desktop session: stronger warning
 
 
 class ProcessList(BaseModel):
@@ -296,3 +300,15 @@ class LogFileContent(BaseModel):
     path: str
     lines: list[str]
     truncated: bool
+
+
+# ---------- privileged actions ----------
+
+class ActionResult(BaseModel):
+    message: str
+    privileged: bool  # True when the system password dialog was used
+
+
+class FirewallStatus(BaseModel):
+    installed: bool
+    enabled: bool
