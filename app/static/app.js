@@ -207,10 +207,15 @@ function wire() {
   $("crash-only").addEventListener("change", reload);
   $("limit").addEventListener("change", reload);
   $("refresh").addEventListener("click", reload);
-  $("auto").addEventListener("change", () => {
+  const startAuto = () => {
     clearInterval(autoTimer);
-    if ($("auto").checked) autoTimer = setInterval(reload, 10_000);
-  });
+    // Skip refreshes while the Journal tab is hidden: no wasted journalctl calls.
+    if ($("auto").checked) {
+      autoTimer = setInterval(() => { if (!$("view-logs").hidden) reload(); }, 10_000);
+    }
+  };
+  $("auto").addEventListener("change", startAuto);
+  startAuto();
 }
 
 async function main() {

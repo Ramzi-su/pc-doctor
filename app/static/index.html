@@ -3,75 +3,177 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Log Viewer</title>
+  <title>PC Doctor</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
+  <script src="/static/doctor.js" type="module"></script>
 </head>
 <body>
-  <aside id="filters">
-    <h1>Log Viewer</h1>
+  <nav id="tabs">
+    <span class="brand">PC Doctor</span>
+    <a href="#dashboard">Tableau de bord</a>
+    <a href="#hardware">Matériel</a>
+    <a href="#network">Réseau</a>
+    <a href="#ports">Ports</a>
+    <a href="#accounts">Utilisateurs &amp; groupes</a>
+    <a href="#security">Droits &amp; SUID</a>
+    <a href="#logs">Journal</a>
+    <a href="#logfiles">Fichiers /var/log</a>
+    <span id="live-dot" title="Mise à jour en direct"></span>
+  </nav>
 
-    <section>
-      <h2>Période</h2>
-      <select id="range">
-        <option value="10">10 dernières minutes</option>
-        <option value="60" selected>Dernière heure</option>
-        <option value="1440">24 heures</option>
-        <option value="10080">7 jours</option>
-        <option value="custom">Personnalisée…</option>
-      </select>
-      <div id="custom-range" hidden>
-        <label>Du <input type="datetime-local" id="since"></label>
-        <label>Au <input type="datetime-local" id="until"></label>
+  <!-- ===== Dashboard ===== -->
+  <div class="view" id="view-dashboard" hidden>
+    <div class="grid">
+      <div class="card wide">
+        <h2>Diagnostic <button type="button" id="diag-refresh" class="small">Relancer</button></h2>
+        <ul id="diagnosis" class="findings"></ul>
       </div>
-    </section>
-
-    <section>
-      <h2>Criticité</h2>
-      <div id="priorities"></div>
-      <div class="row">
-        <button type="button" id="prio-errors">Erreurs seulement</button>
-        <button type="button" id="prio-all">Tout</button>
+      <div class="card"><h2>Processeur</h2><div id="live-cpu"></div></div>
+      <div class="card"><h2>Mémoire</h2><div id="live-mem"></div></div>
+      <div class="card"><h2>Températures</h2><div id="live-temps"></div></div>
+      <div class="card"><h2>Carte graphique</h2><div id="live-gpu"></div></div>
+      <div class="card"><h2>Réseau &amp; disque</h2><div id="live-io"></div></div>
+      <div class="card"><h2>Système</h2><div id="live-sys"></div></div>
+      <div class="card wide">
+        <h2>Processus les plus actifs <span id="proc-count" class="muted"></span></h2>
+        <table class="data" id="live-procs"></table>
       </div>
-    </section>
+    </div>
+  </div>
 
-    <section>
-      <h2>Logiciels <span id="ident-count"></span></h2>
-      <div class="row" id="quick-idents"></div>
-      <input type="search" id="ident-search" placeholder="Chercher un logiciel…">
-      <div id="identifiers"></div>
-      <button type="button" id="ident-clear">Tout désélectionner</button>
-    </section>
+  <!-- ===== Hardware ===== -->
+  <div class="view" id="view-hardware" hidden>
+    <div class="grid" id="hardware"></div>
+  </div>
 
-    <section>
-      <h2>Recherche</h2>
-      <input type="search" id="text" placeholder="Texte dans le message" maxlength="200">
-      <label class="check"><input type="checkbox" id="crash-only"> Crashs uniquement</label>
-      <label>Max. lignes
-        <select id="limit">
-          <option>200</option><option selected>500</option>
-          <option>1000</option><option>5000</option>
+  <!-- ===== Network ===== -->
+  <div class="view" id="view-network" hidden>
+    <div class="grid" id="network"></div>
+  </div>
+
+  <!-- ===== Ports ===== -->
+  <div class="view" id="view-ports" hidden>
+    <div class="toolbar">
+      <label class="check"><input type="checkbox" id="ports-exposed"> Seulement les ports ouverts sur le réseau</label>
+      <span class="muted">Sans root, le nom du processus n'est visible que pour tes propres programmes.</span>
+    </div>
+    <table class="data" id="ports"></table>
+  </div>
+
+  <!-- ===== Accounts ===== -->
+  <div class="view" id="view-accounts" hidden>
+    <div class="toolbar">
+      <label class="check"><input type="checkbox" id="users-human" checked> Seulement les comptes humains et root</label>
+      <input type="search" id="accounts-search" placeholder="Filtrer…">
+    </div>
+    <h2>Utilisateurs</h2>
+    <table class="data" id="users"></table>
+    <h2>Groupes</h2>
+    <label class="check"><input type="checkbox" id="groups-sensitive" checked> Seulement les groupes sensibles ou non vides</label>
+    <table class="data" id="groups"></table>
+    <h2>Dernières connexions</h2>
+    <table class="data" id="logins"></table>
+  </div>
+
+  <!-- ===== Security ===== -->
+  <div class="view" id="view-security" hidden>
+    <h2>Droits des fichiers sensibles</h2>
+    <table class="data" id="perm-files"></table>
+    <h2>Fichiers système modifiables par tous</h2>
+    <div id="world-writable"></div>
+    <h2>Fichiers SUID / SGID</h2>
+    <div class="toolbar">
+      <button type="button" id="suid-scan" class="primary">Scanner le disque</button>
+      <label class="check"><input type="checkbox" id="suid-unknown"> Seulement les inhabituels</label>
+      <span id="suid-status" class="muted"></span>
+    </div>
+    <table class="data" id="suid"></table>
+  </div>
+
+  <!-- ===== Journal (existing log viewer, driven by app.js) ===== -->
+  <div class="view logs-view" id="view-logs" hidden>
+    <aside id="filters">
+      <h1>Journal</h1>
+
+      <section>
+        <h2>Période</h2>
+        <select id="range">
+          <option value="10">10 dernières minutes</option>
+          <option value="60" selected>Dernière heure</option>
+          <option value="1440">24 heures</option>
+          <option value="10080">7 jours</option>
+          <option value="custom">Personnalisée…</option>
         </select>
-      </label>
-    </section>
+        <div id="custom-range" hidden>
+          <label>Du <input type="datetime-local" id="since"></label>
+          <label>Au <input type="datetime-local" id="until"></label>
+        </div>
+      </section>
 
-    <section class="row">
-      <button type="button" id="refresh" class="primary">Rafraîchir</button>
-      <label class="check"><input type="checkbox" id="auto"> Auto (10 s)</label>
-    </section>
-  </aside>
+      <section>
+        <h2>Criticité</h2>
+        <div id="priorities"></div>
+        <div class="row">
+          <button type="button" id="prio-errors">Erreurs seulement</button>
+          <button type="button" id="prio-all">Tout</button>
+        </div>
+      </section>
 
-  <main>
-    <header id="status-bar">
-      <span id="status">Chargement…</span>
-      <span id="summary"></span>
-    </header>
-    <table>
-      <thead>
-        <tr><th>Date</th><th>Niveau</th><th>Logiciel</th><th>PID</th><th>Message</th></tr>
-      </thead>
-      <tbody id="logs"></tbody>
-    </table>
-  </main>
+      <section>
+        <h2>Logiciels <span id="ident-count"></span></h2>
+        <div class="row" id="quick-idents"></div>
+        <input type="search" id="ident-search" placeholder="Chercher un logiciel…">
+        <div id="identifiers"></div>
+        <button type="button" id="ident-clear">Tout désélectionner</button>
+      </section>
+
+      <section>
+        <h2>Recherche</h2>
+        <input type="search" id="text" placeholder="Texte dans le message" maxlength="200">
+        <label class="check"><input type="checkbox" id="crash-only"> Crashs uniquement</label>
+        <label>Max. lignes
+          <select id="limit">
+            <option>200</option><option selected>500</option>
+            <option>1000</option><option>5000</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="row">
+        <button type="button" id="refresh" class="primary">Rafraîchir</button>
+        <label class="check"><input type="checkbox" id="auto" checked> Auto (10 s)</label>
+      </section>
+    </aside>
+
+    <main>
+      <header id="status-bar">
+        <span id="status">Chargement…</span>
+        <span id="summary"></span>
+      </header>
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Niveau</th><th>Logiciel</th><th>PID</th><th>Message</th></tr>
+        </thead>
+        <tbody id="logs"></tbody>
+      </table>
+    </main>
+  </div>
+
+  <!-- ===== /var/log files ===== -->
+  <div class="view logs-view" id="view-logfiles" hidden>
+    <aside id="logfile-list-panel">
+      <input type="search" id="logfile-search" placeholder="Chercher un fichier…">
+      <div id="logfile-list"></div>
+    </aside>
+    <main>
+      <header id="logfile-bar">
+        <strong id="logfile-name">Choisis un fichier</strong>
+        <input type="search" id="logfile-text" placeholder="Filtrer les lignes" maxlength="200">
+        <label class="check"><input type="checkbox" id="logfile-follow" checked> Suivre (5 s)</label>
+      </header>
+      <pre id="logfile-content"></pre>
+    </main>
+  </div>
 </body>
 </html>
