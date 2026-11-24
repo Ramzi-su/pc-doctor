@@ -14,6 +14,8 @@ function h(tag, props = {}, ...children) {
     if (key === "class") node.className = value;
     else if (key === "style") Object.assign(node.style, value); // CSSOM: allowed by our CSP
     else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    // aria-* and data-* only exist as HTML attributes, not as DOM properties.
+    else if (key.startsWith("aria-") || key.startsWith("data-")) node.setAttribute(key, value);
     else node[key] = value;
   }
   for (const child of children.flat()) {
@@ -136,6 +138,13 @@ function svg(tag, attrs = {}, ...children) {
   return node;
 }
 
+// Series key: a short line drawn like the series itself (same color, and
+// the same dash pattern in forced-colors mode), used in legend and tooltip.
+function keyLine(color, k) {
+  return svg("svg", { class: "key", width: "22", height: "4", "aria-hidden": "true" },
+    svg("line", { class: "line", "data-series": k % 8, x1: 1, x2: 21, y1: 2, y2: 2, style: { stroke: `var(${color})` } }));
+}
+
 // Round an axis maximum up to 1, 2 or 5 x 10^n so tick labels stay readable.
 function niceMax(value) {
   if (!(value > 0)) return 1;
@@ -163,11 +172,26 @@ class LineChart {
   constructor(el, opts) {
     this.opts = { height: 180, ...opts };
     this.hover = null;
+    this.showTable = false;
     this.legend = h("div", { class: "legend" });
+    // Table view: the accessible twin of the chart. Every value the chart
+    // draws can be read here without hovering (and by screen readers).
+    this.tableToggle = h("button", {
+      type: "button", class: "small table-toggle", "aria-pressed": "false",
+      onclick: () => {
+        this.showTable = !this.showTable;
+        this.tableToggle.setAttribute("aria-pressed", String(this.showTable));
+        this.tableToggle.textContent = this.showTable ? "Graphique" : "Tableau";
+        this.wrap.hidden = this.showTable;
+        this.tableBox.hidden = !this.showTable;
+        this.draw();
+      },
+    }, "Tableau");
     this.svg = svg("svg", { class: "chart", tabindex: "0", role: "img" });
     this.tip = h("div", { class: "chart-tip", hidden: true });
     this.wrap = h("div", { class: "chart-wrap" }, this.svg, this.tip);
-    el.replaceChildren(this.legend, this.wrap);
+    this.tableBox = h("div", { class: "chart-table", hidden: true });
+    el.replaceChildren(h("div", { class: "chart-head" }, this.legend, this.tableToggle), this.wrap, this.tableBox);
 
     this.svg.addEventListener("pointermove", (e) => this.pointer(e));
     this.svg.addEventListener("pointerleave", () => this.setHover(null));
@@ -239,7 +263,7 @@ class LineChart {
       }, label));
     }
 
-    for (const s of series) {
+    series.forEach((s, k) => {
       // Gaps (null = no reading, e.g. GPU asleep) break the line.
       let d = "";
       let pen = false;
@@ -248,7 +272,7 @@ class LineChart {
         d += `${pen ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`;
         pen = true;
       });
-      if (!d) continue;
+      if (!d) return;
       if (this.opts.area && series.length === 1) {
         const first = s.values.findIndex((v) => v !== null);
         nodes.push(svg("path", {
@@ -256,21 +280,35 @@ class LineChart {
           d: `${d}L${X(n - 1)},${Y(0)}L${X(first)},${Y(0)}Z`,
         }));
       }
-      nodes.push(svg("path", { class: "line", style: { stroke: `var(${s.color})` }, d }));
-    }
+      // data-series: dash pattern used only in forced-colors mode, where every
+      // line gets the same system color (see style.css).
+      nodes.push(svg("path", { class: "line", "data-series": k % 8, style: { stroke: `var(${s.color})` }, d }));
+    });
 
-    // Direct labels at the line ends (<= 4 series), pushed apart to avoid overlap.
+    // Direct labels at the line ends (<= 4 series). When two ends are too
+    // close, the label moves but a thin leader line ties it back to its
+    // line end, so it never floats detached from the line it names.
     if (series.length >= 2 && series.length <= 4) {
       const ends = series
-        .map((s) => ({ s, v: [...s.values].reverse().find((v) => v !== null) }))
-        .filter((e) => e.v !== undefined)
-        .map((e) => ({ ...e, y: Y(e.v) }))
-        .sort((a, b) => a.y - b.y);
+        .map((s) => {
+          const i = s.values.findLastIndex((v) => v !== null && v !== undefined);
+          return i < 0 ? null : { s, x: X(i), y0: Y(s.values[i]) };
+        })
+        .filter(Boolean)
+        .map((e) => ({ ...e, y: e.y0 }))
+        .sort((a, b) => a.y0 - b.y0);
       for (let k = 1; k < ends.length; k++) ends[k].y = Math.max(ends[k].y, ends[k - 1].y + 13);
       const overflow = (ends.at(-1)?.y ?? 0) - (MARGIN.top + plotH);
+      const labelX = W - MARGIN.right + 10;
       for (const e of ends) {
         if (overflow > 0) e.y -= overflow;
-        nodes.push(svg("text", { class: "end-label", x: W - MARGIN.right + 6, y: e.y + 4 }, e.s.name));
+        if (Math.abs(e.y - e.y0) > 1.5 || labelX - e.x > 12) {
+          nodes.push(svg("polyline", {
+            class: "leader",
+            points: `${e.x + 3},${e.y0} ${labelX - 8},${e.y0} ${labelX - 3},${e.y}`,
+          }));
+        }
+        nodes.push(svg("text", { class: "end-label", x: labelX, y: e.y + 4 }, e.s.name));
       }
     }
 
@@ -293,7 +331,7 @@ class LineChart {
       this.tip.replaceChildren(
         h("div", { class: "tip-time" }, when),
         ...series.map((s) => h("div", { class: "tip-row" },
-          h("span", { class: "key", style: { background: `var(${s.color})` } }),
+          keyLine(s.color, series.indexOf(s)),
           h("strong", {}, s.values[i] === null || s.values[i] === undefined ? "—" : format(s.values[i])),
           h("span", { class: "muted" }, s.name))),
       );
@@ -309,13 +347,38 @@ class LineChart {
     this.legend.replaceChildren(...(series.length >= 2 ? series.map((s) => {
       const last = [...s.values].reverse().find((v) => v !== null);
       return h("span", { class: "legend-item" },
-        h("span", { class: "key", style: { background: `var(${s.color})` } }),
+        keyLine(s.color, series.indexOf(s)),
         s.name, " ", h("strong", {}, last === undefined ? "—" : format(last)));
     }) : []));
+    if (this.showTable) this.drawTable();
     this.svg.setAttribute("aria-label", series.map((s) => {
       const last = [...s.values].reverse().find((v) => v !== null);
       return `${s.name} : ${last === undefined ? "aucune donnée" : format(last)}`;
     }).join(", "));
+  }
+
+  /** Table twin: one row per sample, newest first, one column per series. */
+  drawTable() {
+    const { format } = this.opts;
+    const times = this.times ?? [];
+    const series = this.series ?? [];
+    const n = times.length;
+    const when = (i) => this.opts.fromLeft
+      ? `${Math.round((times[i] - times[0]) / 1000)} s`
+      : i === n - 1 ? "maintenant" : `il y a ${Math.round((times[n - 1] - times[i]) / 1000)} s`;
+    const rows = [];
+    for (let i = n - 1; i >= 0; i--) {
+      rows.push(h("tr", {}, h("th", { scope: "row" }, when(i)),
+        series.map((s) => h("td", {}, s.values[i] === null || s.values[i] === undefined ? "—" : format(s.values[i])))));
+    }
+    const scrollTop = this.tableBox.firstChild?.scrollTop ?? 0;
+    const table = h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Instant"),
+        series.map((s) => h("th", { scope: "col" }, s.name)))),
+      h("tbody", {}, rows.length ? rows : h("tr", {}, h("td", { colSpan: series.length + 1, class: "muted" }, "Pas encore de mesure"))));
+    const box = h("div", { class: "chart-table-scroll" }, table);
+    this.tableBox.replaceChildren(box);
+    box.scrollTop = scrollTop; // live refresh must not jump the reader back to the top
   }
 }
 

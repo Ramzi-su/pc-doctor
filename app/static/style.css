@@ -101,7 +101,6 @@ tr.crash { background: var(--crash-bg); }
 .card h2 { display: flex; justify-content: space-between; align-items: center; }
 .card h3 { font-size: 14px; margin: 10px 0 4px; }
 .muted { color: var(--muted); font-weight: normal; text-transform: none; letter-spacing: 0; }
-.big { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
 button.small { padding: 1px 8px; font-size: 12px; text-transform: none; letter-spacing: 0; }
 
 dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; }
@@ -109,15 +108,21 @@ dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
 
 .meter { display: grid; grid-template-columns: 110px 1fr minmax(70px, max-content); gap: 8px; align-items: center; margin: 4px 0; }
-.meter .bar { height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; }
+/* The unfilled track is a lighter step of the fill's own hue, so the state
+   reads across the whole bar. */
+.meter .bar { height: 8px; background: color-mix(in oklab, var(--notice) 16%, transparent); border-radius: 4px; overflow: hidden; }
+.meter .bar:has(.fill.warn) { background: color-mix(in oklab, var(--warning) 18%, transparent); }
+.meter .bar:has(.fill.crit) { background: color-mix(in oklab, var(--err) 16%, transparent); }
 .meter .fill { height: 100%; background: var(--notice); border-radius: 4px; transition: width .4s; }
 .meter .fill.warn { background: var(--warning); }
 .meter .fill.crit { background: var(--err); }
 .meter > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meter .val { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
-.cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(14px, 1fr)); gap: 3px; height: 40px; margin: 8px 0; }
-.cores .core { background: var(--track); border-radius: 2px; display: flex; align-items: flex-end; }
-.cores .core div { width: 100%; background: var(--notice); border-radius: 2px; transition: height .4s; }
+/* Columns: <= 24px wide, 2px surface gap, 4px rounded data-end, square at the
+   baseline; the empty track is a lighter step of the same hue. */
+.cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(12px, 24px)); gap: 2px; height: 40px; margin: 8px 0; }
+.cores .core { background: color-mix(in oklab, var(--series-1) 16%, transparent); border-radius: 4px 4px 0 0; display: flex; align-items: flex-end; overflow: hidden; }
+.cores .core div { width: 100%; background: var(--series-1); border-radius: 4px 4px 0 0; transition: height .4s; }
 
 ul.findings { list-style: none; margin: 0; padding: 0; }
 ul.findings li { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }
@@ -203,13 +208,14 @@ svg.chart .grid { stroke: var(--grid); stroke-width: 1; }
 svg.chart .baseline { stroke: var(--axis); stroke-width: 1; }
 svg.chart .tick { fill: var(--tick); font: 11px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
 svg.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-svg.chart .area { opacity: .12; }
+svg.chart .area { opacity: .10; }  /* a wash, never a saturated block */
 svg.chart .end-label { fill: var(--muted); font: 11px system-ui, sans-serif; }
 svg.chart .crosshair { stroke: var(--tick); stroke-width: 1; }
 svg.chart .dot { stroke: var(--panel); stroke-width: 2; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; min-height: 18px; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
 .legend-item strong { color: var(--text); font-variant-numeric: tabular-nums; }
-.key { display: inline-block; width: 12px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 5px; }
+svg.key { display: inline-block; vertical-align: middle; margin-right: 5px; overflow: visible; }
+svg.key .line { stroke-width: 2; stroke-linecap: round; }
 .chart-tip {
   position: absolute; top: 4px; pointer-events: none; z-index: 2; min-width: 130px; padding: 6px 9px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
@@ -230,3 +236,32 @@ code.install { display: inline-block; margin: 2px 4px; padding: 1px 6px; border-
 .test-charts { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); margin-bottom: 10px; }
 .test-charts[hidden] { display: none; }
 #test-log { max-height: 260px; overflow: auto; font: 12px/1.4 ui-monospace, monospace; background: var(--bg); padding: 8px; border-radius: 6px; white-space: pre-wrap; }
+
+/* ===== Chart table view, leader lines, forced colors ===== */
+.chart-head { display: flex; align-items: flex-start; gap: 8px; }
+.chart-head .legend { flex: 1; }
+.table-toggle { flex: none; }
+.chart-table[hidden], .chart-wrap[hidden] { display: none; }
+.chart-table-scroll { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.chart-table table.data { font-variant-numeric: tabular-nums; }
+.chart-table table.data { font-size: 12px; }
+.chart-table table.data th, .chart-table table.data td { padding: 2px 6px; white-space: nowrap; }
+.chart-table thead th { position: sticky; top: 0; background: var(--panel); }
+.chart-table tbody th { text-align: left; font-weight: normal; color: var(--muted); }
+svg.chart .leader { fill: none; stroke: var(--tick); stroke-width: 1; }
+
+/* Forced colors (Windows high contrast...): every line gets the same system
+   color, so a dash pattern takes over as the identity channel. Off otherwise. */
+@media (forced-colors: active) {
+  svg.chart .line, svg.key .line { stroke: CanvasText !important; }
+  svg .line[data-series="1"] { stroke-dasharray: 8 4; }
+  svg .line[data-series="2"] { stroke-dasharray: 2 3; }
+  svg .line[data-series="3"] { stroke-dasharray: 10 3 2 3; }
+  svg .line[data-series="4"] { stroke-dasharray: 1 6; }
+  svg .line[data-series="5"] { stroke-dasharray: 14 4; }
+  svg .line[data-series="6"] { stroke-dasharray: 6 2 2 2 2 2; }
+  svg .line[data-series="7"] { stroke-dasharray: 4 8; }
+  /* Fills vanish in this mode: draw bars and meters with system colors. */
+  .cores .core, .meter .bar { forced-color-adjust: none; background: Canvas; outline: 1px solid CanvasText; }
+  .cores .core div, .meter .fill { forced-color-adjust: none; background: Highlight; }
+}
