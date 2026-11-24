@@ -170,20 +170,6 @@ def unit_of_pid(pid: int, proc_root: Path = Path("/proc")) -> str | None:
     return match.group(1) if match else None
 
 
-def parse_ss_owners(output: str) -> dict[tuple[str, int, str], int]:
-    """`ss -tulpnH` (as root) -> {(proto, port, address): pid}."""
-    owners = {}
-    for line in output.splitlines():
-        parts = line.split()
-        match = re.search(r'users:\(\("[^"]*",pid=(\d+)', line)
-        if len(parts) < 5 or not match or parts[0] not in ("tcp", "udp"):
-            continue
-        endpoint = split_endpoint(parts[4])
-        if endpoint:
-            owners[(parts[0], endpoint[1], endpoint[0])] = int(match.group(1))
-    return owners
-
-
 class RevealedOwners:
     """Port owners found once with root, kept to fill later listings.
 

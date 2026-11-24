@@ -1,4 +1,6 @@
+import json
 import os
+import socket
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -8,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.system import actions, network
+from app.system import actions, network, procnet, root_helpers
 
 client = TestClient(app, base_url="http://127.0.0.1")
 CSRF = {"X-Requested-With": "pc-doctor"}
@@ -51,10 +53,13 @@ def test_run_privileged_explains_failures(code, message):
         actions.run_privileged(["/usr/bin/true"], fake_runner(code, stderr="boom"))
 
 
-def test_run_privileged_prefixes_pkexec_with_absolute_paths():
+def test_run_privileged_prefixes_pkexec_and_keeps_exit_code():
     run = fake_runner(stdout="ok")
-    assert actions.run_privileged([actions.KILL, "-s", "TERM", "--", "42"], run) == "ok"
-    assert run.calls == [["/usr/bin/pkexec", "/usr/bin/kill", "-s", "TERM", "--", "42"]]
+    assert actions.run_privileged([actions.UFW, "status"], run) == "ok"
+    assert run.calls == [["/usr/bin/pkexec", "/usr/sbin/ufw", "status"]]
+    with pytest.raises(actions.ActionError) as err:
+        actions.run_privileged([actions.UFW], fake_runner(3))
+    assert err.value.returncode == 3
 
 
 # ---------- kill ----------
@@ -79,15 +84,59 @@ def test_kill_refuses_protected_processes():
         actions.kill_process(os.getpid(), started_at(os.getpid()), "KILL", fake_runner())
 
 
-def test_kill_other_users_process_goes_through_pkexec(sleeper, monkeypatch):
-    def denied(_pid, _sig):
+def deny_signal(monkeypatch):
+    def denied(_fd, _sig):
         raise PermissionError
 
-    monkeypatch.setattr(actions.os, "kill", denied)
+    monkeypatch.setattr(actions.signal, "pidfd_send_signal", denied)
+
+
+def test_kill_other_users_process_runs_the_root_helper(sleeper, monkeypatch):
+    deny_signal(monkeypatch)
     run = fake_runner()
     result = actions.kill_process(sleeper.pid, started_at(sleeper.pid), "KILL", run)
     assert result.privileged
-    assert run.calls == [["/usr/bin/pkexec", "/usr/bin/kill", "-s", "KILL", "--", str(sleeper.pid)]]
+    ticks = actions.start_ticks(sleeper.pid)
+    assert run.calls == [["/usr/bin/pkexec", "/usr/bin/python3", "-I", "-S", "-c",
+                          root_helpers.KILL_IF_SAME, str(sleeper.pid), ticks, "KILL"]]
+
+
+@pytest.mark.parametrize(("code", "message"), [(3, "autre programme"), (4, "terminé pendant")])
+def test_kill_root_helper_refusals_are_explained(sleeper, monkeypatch, code, message):
+    deny_signal(monkeypatch)
+    with pytest.raises(actions.ActionError, match=message):
+        actions.kill_process(sleeper.pid, started_at(sleeper.pid), "TERM", fake_runner(code))
+
+
+def run_helper(code: str, *args: str) -> subprocess.CompletedProcess:
+    """Run a root helper for real, without pkexec, on our own processes."""
+    return subprocess.run(root_helpers.command(code, *args), capture_output=True, text=True, timeout=10)
+
+
+def test_kill_helper_kills_the_right_process(sleeper):
+    result = run_helper(root_helpers.KILL_IF_SAME, str(sleeper.pid), actions.start_ticks(sleeper.pid), "TERM")
+    assert result.returncode == 0, result.stderr
+    assert sleeper.wait(timeout=2) == -15
+
+
+def test_kill_helper_refuses_another_process(sleeper):
+    wrong = str(int(actions.start_ticks(sleeper.pid)) - 1)
+    assert run_helper(root_helpers.KILL_IF_SAME, str(sleeper.pid), wrong, "KILL").returncode == 3
+    assert sleeper.poll() is None
+
+
+def test_kill_helper_reports_gone_process(sleeper):
+    pid, ticks = sleeper.pid, actions.start_ticks(sleeper.pid)
+    sleeper.kill()
+    sleeper.wait()
+    assert run_helper(root_helpers.KILL_IF_SAME, str(pid), ticks, "TERM").returncode == 4
+
+
+def test_start_ticks_handles_parentheses_in_name(tmp_path):
+    (tmp_path / "42").mkdir()
+    # a process may name itself "a) b" to shift naive field splitting
+    (tmp_path / "42/stat").write_text("42 (a) b) S 1 42 42 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 98765 0 0")
+    assert actions.start_ticks(42, tmp_path) == "98765"
 
 
 def test_kill_rejects_unknown_signal(sleeper):
@@ -112,20 +161,34 @@ def test_parse_list_sockets():
     assert len(units) == 2  # the unix socket is ignored
 
 
-SS_OUTPUT = """\
-tcp   LISTEN 0 128  0.0.0.0:22       0.0.0.0:* users:(("systemd",pid=1,fd=50))
-tcp   LISTEN 0 70   127.0.0.1:3306   0.0.0.0:* users:(("mysqld",pid=2347,fd=21))
-udp   UNCONN 0 0    127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=812,fd=13))
-udp   UNCONN 0 0    *:5353           *:*
-"""
+def test_socket_owners_helper_finds_our_listening_socket():
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        result = run_helper(root_helpers.SOCKET_OWNERS)
+        owners = {int(k): v for k, v in json.loads(result.stdout).items()}
+        inode = actions.listening_inodes(procnet.sockets())[("tcp", port, "127.0.0.1")]
+    assert owners[inode] == os.getpid()
 
 
-def test_parse_ss_owners():
-    assert network.parse_ss_owners(SS_OUTPUT) == {
-        ("tcp", 22, "*"): 1,
-        ("tcp", 3306, "127.0.0.1"): 2347,
-        ("udp", 53, "127.0.0.53"): 812,
-    }
+def test_reveal_matches_inodes_with_listening_ports(monkeypatch):
+    entries = [
+        procnet.SocketEntry("tcp", "0.0.0.0", 22, "0.0.0.0", 0, "0A", 0, 111),
+        procnet.SocketEntry("tcp", "127.0.0.1", 50000, "127.0.0.1", 22, "01", 1000, 222),  # not listening
+        procnet.SocketEntry("udp", "127.0.0.53", 53, "0.0.0.0", 0, "07", 991, 333),
+    ]
+    monkeypatch.setattr(procnet, "sockets", lambda: entries)
+    revealed = network.RevealedOwners()
+    monkeypatch.setattr(network, "revealed_owners", revealed)
+    monkeypatch.setattr(revealed, "update", lambda owners: setattr(revealed, "got", owners))
+    actions.reveal_port_owners(fake_runner(stdout='{"111": 1, "222": 4000, "333": 812}'))
+    assert revealed.got == {("tcp", 22, "*"): 1, ("udp", 53, "127.0.0.53"): 812}
+
+
+def test_reveal_rejects_garbage_output():
+    with pytest.raises(actions.ActionError, match="inattendue"):
+        actions.reveal_port_owners(fake_runner(stdout="not json"))
 
 
 @pytest.mark.parametrize(("raw", "normalized"), [

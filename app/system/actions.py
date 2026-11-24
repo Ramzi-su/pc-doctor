@@ -2,7 +2,8 @@
 
 The web server always runs as the normal user. Root is obtained for one
 command at a time through polkit:
-- `pkexec <absolute path> <args>` opens the system password dialog;
+- `pkexec <absolute path> <args>` opens the system password dialog
+  (see root_helpers.py for the small programs we run that way);
 - `systemctl stop` asks polkit by itself (same dialog).
 The password never goes through PC Doctor: polkit's agent (gnome-shell)
 handles it.
@@ -15,6 +16,7 @@ Security rules:
   the page (the page sends a port number, not a unit name).
 """
 
+import json
 import os
 import signal
 from datetime import datetime
@@ -23,14 +25,12 @@ from typing import Literal
 
 import psutil
 
-from app.system import network, runner
+from app.system import network, procnet, root_helpers, runner
 from app.system.models import ActionResult, FirewallStatus
 from app.system.processes import is_protected
 from app.system.runner import CommandError
 
 PKEXEC = "/usr/bin/pkexec"
-KILL = "/usr/bin/kill"
-SS = "/usr/bin/ss"
 SYSTEMCTL = "/usr/bin/systemctl"
 UFW = "/usr/sbin/ufw"
 UFW_CONF = Path("/etc/ufw/ufw.conf")
@@ -47,6 +47,10 @@ SIGNALS = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL}
 class ActionError(RuntimeError):
     """Refused or failed action; the message is shown to the user as is."""
 
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+
 
 def run_privileged(cmd: list[str], run: runner.Runner | None = None) -> str:
     """Run `cmd` as root after the system password dialog."""
@@ -59,51 +63,104 @@ def run_privileged(cmd: list[str], run: runner.Runner | None = None) -> str:
     if proc.returncode == PKEXEC_NOT_AUTHORIZED:
         raise ActionError("Authentification refusée (mauvais mot de passe ou pas d'agent polkit).")
     if proc.returncode != 0:
-        raise ActionError(proc.stderr.strip()[:300] or f"{cmd[0]} a échoué")
+        raise ActionError(proc.stderr.strip()[:300] or f"{cmd[0]} a échoué", proc.returncode)
     return proc.stdout
 
 
 # ---------- processes ----------
 
+KILL_OTHER_PROCESS = 3  # exit codes of root_helpers.KILL_IF_SAME
+KILL_GONE = 4
+
+
+def start_ticks(pid: int, proc_root: Path = Path("/proc")) -> str:
+    """Start time of `pid` in clock ticks since boot (/proc/<pid>/stat, field 22).
+
+    The command name (field 2) is in parentheses and may contain spaces or
+    ")" itself, so we split after the *last* ")".
+    """
+    stat = (proc_root / str(pid) / "stat").read_text()
+    return stat.rsplit(")", 1)[1].split()[19]
+
+
 def kill_process(pid: int, started: datetime, sig: Signal,
                  run: runner.Runner | None = None) -> ActionResult:
     """Send SIGTERM (ask to quit) or SIGKILL (force) to `pid`.
 
-    `started` is the start time the page displayed. PIDs are recycled: if the
-    process exited and another one got the same number, its start time
-    differs, and we refuse instead of killing the wrong program.
+    PIDs are recycled: if the process the page showed has exited and another
+    one got its number, we must not kill the newcomer. So:
+    1. pidfd_open() gives a handle on *this* process: as long as it is open,
+       a signal sent through it can only reach this process;
+    2. we check its start time against the one the page displayed;
+    3. we signal through the pidfd. Another user's process needs root: the
+       same open-check-signal sequence then runs in one root process.
     """
     if sig not in SIGNALS:
         raise ActionError("Signal non autorisé.")
     try:
-        proc = psutil.Process(pid)
-        created, ppid, name = proc.create_time(), proc.ppid(), proc.name()
-    except psutil.NoSuchProcess as exc:
-        raise ActionError("Ce processus est déjà terminé.") from exc
-    if abs(created - started.timestamp()) > 0.01:
-        raise ActionError("Ce PID appartient maintenant à un autre programme : rafraîchis la liste.")
-    if is_protected(pid, ppid):
-        raise ActionError(f"{name} ({pid}) est protégé : le tuer bloquerait la machine ou PC Doctor.")
-
-    try:
-        os.kill(pid, SIGNALS[sig])  # own process: no root needed
-        return ActionResult(message=f"Signal {sig} envoyé à {name} ({pid}).", privileged=False)
+        pidfd = os.pidfd_open(pid)
     except ProcessLookupError as exc:
         raise ActionError("Ce processus est déjà terminé.") from exc
-    except PermissionError:
-        pass  # another user's process: retry as root
+    try:
+        try:
+            proc = psutil.Process(pid)
+            created, ppid, name = proc.create_time(), proc.ppid(), proc.name()
+            ticks = start_ticks(pid)
+        except (psutil.NoSuchProcess, FileNotFoundError) as exc:
+            raise ActionError("Ce processus est déjà terminé.") from exc
+        if abs(created - started.timestamp()) > 0.01:
+            raise ActionError("Ce PID appartient maintenant à un autre programme : rafraîchis la liste.")
+        if is_protected(pid, ppid):
+            raise ActionError(f"{name} ({pid}) est protégé : le tuer bloquerait la machine ou PC Doctor.")
+        try:
+            signal.pidfd_send_signal(pidfd, SIGNALS[sig])  # own process: no root needed
+            return ActionResult(message=f"Signal {sig} envoyé à {name} ({pid}).", privileged=False)
+        except ProcessLookupError as exc:
+            raise ActionError("Ce processus est déjà terminé.") from exc
+        except PermissionError:
+            pass  # another user's process: retry as root
+    finally:
+        os.close(pidfd)
 
-    run_privileged([KILL, "-s", sig, "--", str(pid)], run)
+    try:
+        run_privileged(root_helpers.command(root_helpers.KILL_IF_SAME, str(pid), ticks, sig), run)
+    except ActionError as exc:
+        code = getattr(exc, "returncode", None)
+        if code == KILL_OTHER_PROCESS:
+            raise ActionError("Ce PID appartient maintenant à un autre programme : rien n'a été tué.") from exc
+        if code == KILL_GONE:
+            raise ActionError("Ce processus s'est terminé pendant la saisie du mot de passe.") from exc
+        raise
     return ActionResult(message=f"Signal {sig} envoyé à {name} ({pid}) en root.", privileged=True)
 
 
 # ---------- ports ----------
 
+def listening_inodes(entries: list[procnet.SocketEntry]) -> dict[tuple[str, int, str], int]:
+    """(proto, port, address) -> socket inode, for listening sockets only."""
+    inodes = {}
+    for e in entries:
+        listening = e.state == procnet.TCP_LISTEN if e.proto == "tcp" else e.remote_port == 0
+        if listening and e.inode:
+            inodes[(e.proto, e.local_port, network.normalize_address(e.local_ip))] = e.inode
+    return inodes
+
+
 def reveal_port_owners(run: runner.Runner | None = None) -> ActionResult:
-    """One root `ss` call to learn which program owns every port."""
-    owners = network.parse_ss_owners(run_privileged([SS, "-tulpnH"], run))
+    """Find the program behind every port with one root call.
+
+    Root lists the socket inodes each process holds (kernel-written links);
+    we match them with the inodes of /proc/net/* (readable without root).
+    """
+    raw = run_privileged(root_helpers.command(root_helpers.SOCKET_OWNERS), run)
+    try:
+        by_inode = {int(k): int(v) for k, v in json.loads(raw).items()}
+    except (ValueError, AttributeError) as exc:
+        raise ActionError("Réponse inattendue de l'outil root.") from exc
+    owners = {key: by_inode[inode] for key, inode in listening_inodes(procnet.sockets()).items()
+              if inode in by_inode}
     network.revealed_owners.update(owners)
-    return ActionResult(message=f"{len(owners)} propriétaires de ports identifiés.", privileged=True)
+    return ActionResult(message=f"{len(owners)} ports associés à leur programme.", privileged=True)
 
 
 def units_for_port(protocol: Protocol, port: int) -> list[str]:

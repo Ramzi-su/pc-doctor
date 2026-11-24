@@ -1,6 +1,7 @@
 """PC Doctor FastAPI app: JSON API + static UI. Run it bound to 127.0.0.1 only."""
 
 import asyncio
+import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from app import journal
 from app.models import LogQuery, LogResult, Priority
-from app.system import accounts, actions, doctor, hardware, live, logfiles, network, permissions, processes
+from app.system import accounts, actions, doctor, hardware, live, logfiles, network, permissions, processes, procnet
 from app.system.models import (
     Accounts,
     ActionResult,
@@ -59,6 +60,29 @@ app = FastAPI(title="PC Doctor", docs_url=None, redoc_url=None, openapi_url=None
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # Reject requests whose Host header is not local (blocks DNS rebinding attacks).
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+
+
+ENFORCE_SAME_USER = True  # tests switch it off: TestClient has no real socket
+
+
+@app.middleware("http")
+async def only_same_user(request: Request, call_next):
+    """Refuse connections from programs of other local accounts.
+
+    127.0.0.1 is reachable by every user of the machine, and the CSRF header
+    only stops web pages. Without this check, another account (a service
+    user, a guest...) could kill our processes without any password, or
+    read the full map of the machine. The kernel records the owner UID of
+    every socket in /proc/net/tcp: the client's end must be ours.
+    """
+    if ENFORCE_SAME_USER:
+        client, server = request.scope.get("client"), request.scope.get("server")
+        uid = None
+        if client and server:
+            uid = await run_in_threadpool(procnet.peer_uid, client[0], client[1], server[1])
+        if uid != os.getuid():
+            return Response("PC Doctor only answers its own user.", status_code=403)
+    return await call_next(request)
 
 
 @app.middleware("http")
