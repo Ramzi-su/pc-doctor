@@ -26,22 +26,25 @@
 
   <!-- ===== Dashboard ===== -->
   <div class="view" id="view-dashboard" hidden>
+    <div class="tiles" id="tiles"></div>
     <div class="grid">
       <div class="card wide">
         <h2>Diagnostic <button type="button" id="diag-refresh" class="small">Relancer</button></h2>
         <ul id="diagnosis" class="findings"></ul>
       </div>
-      <div class="card"><h2>Processeur</h2><div id="live-cpu"></div></div>
-      <div class="card"><h2>Mémoire</h2><div id="live-mem"></div></div>
-      <div class="card"><h2>Températures</h2><div id="live-temps"></div></div>
+      <div class="card"><h2>Processeur <span class="muted">utilisation</span></h2>
+        <div id="chart-cpu"></div><div id="live-cores"></div></div>
+      <div class="card"><h2>Mémoire <span class="muted">occupation</span></h2><div id="chart-mem"></div></div>
+      <div class="card"><h2>Températures</h2><div id="chart-temp"></div></div>
+      <div class="card"><h2>Réseau <span class="muted">débit, cartes physiques</span></h2><div id="chart-net"></div></div>
+      <div class="card"><h2>Disque <span class="muted">débit</span></h2><div id="chart-disk"></div></div>
       <div class="card"><h2>Carte graphique</h2><div id="live-gpu"></div></div>
-      <div class="card"><h2>Réseau &amp; disque</h2><div id="live-io"></div></div>
-      <div class="card"><h2>Système</h2><div id="live-sys"></div></div>
       <div class="card wide">
         <h2>Processus les plus actifs <a href="#processes" id="proc-count" class="small-link"></a></h2>
         <table class="data" id="live-procs"></table>
       </div>
     </div>
+    <p class="muted hint">Survole un graphique (ou sélectionne-le avec Tab puis ← →) pour lire les valeurs à un instant précis.</p>
   </div>
 
   <!-- ===== Processes ===== -->

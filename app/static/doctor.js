@@ -117,19 +117,199 @@ function table(target, headers, rows) {
 
 const tag = (text, color = "") => h("span", { class: `tag ${color}` }, text);
 
-// Small SVG line chart of the last N values (0-100).
+// ---------- line chart ----------
+// Hand-made SVG chart (no library: our CSP only allows our own scripts).
+// The viewBox matches the real pixel size, so text is never stretched.
+// Hover/focus: a crosshair snaps to the nearest sample and one tooltip
+// lists every series at that instant.
+
 const SVG_NS = "http://www.w3.org/2000/svg";
-function sparkline(values) {
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("class", "spark");
-  svg.setAttribute("viewBox", "0 0 100 100");
-  svg.setAttribute("preserveAspectRatio", "none");
-  const line = document.createElementNS(SVG_NS, "polyline");
-  const step = 100 / Math.max(HISTORY - 1, 1);
-  const offset = HISTORY - values.length;
-  line.setAttribute("points", values.map((v, i) => `${(i + offset) * step},${100 - v}`).join(" "));
-  svg.append(line);
-  return svg;
+function svg(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    // A style="..." attribute is blocked by our CSP (style-src 'self');
+    // setting properties through the CSSOM is allowed.
+    if (k === "style") for (const [prop, val] of Object.entries(v)) node.style.setProperty(prop, val);
+    else node.setAttribute(k, v);
+  }
+  node.append(...children);
+  return node;
+}
+
+// Round an axis maximum up to 1, 2 or 5 x 10^n so tick labels stay readable.
+function niceMax(value) {
+  if (!(value > 0)) return 1;
+  const pow = 10 ** Math.floor(Math.log10(value));
+  return [1, 2, 5, 10].map((m) => m * pow).find((m) => m >= value);
+}
+
+// Same idea for byte rates, in 1024-based units, with steps whose quarters
+// stay round (2 Mo/s -> 0.5 / 1 / 1.5 / 2).
+function niceBytesMax(value) {
+  if (!(value > 0)) return 1024;
+  const unit = 1024 ** Math.floor(Math.log(value) / Math.log(1024));
+  return unit * [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].find((m) => m * unit >= value);
+}
+
+const HISTORY = 60; // 60 samples x 2 s = last 2 minutes
+const MARGIN = { top: 10, right: 92, bottom: 22, left: 52 };
+
+class LineChart {
+  /**
+   * @param {HTMLElement} el container
+   * @param {{format: (v:number)=>string, max?: number, minMax?: number, area?: boolean}} opts
+   *   max: fixed axis top (e.g. 100 %); otherwise auto, never below minMax.
+   */
+  constructor(el, opts) {
+    this.opts = { height: 180, ...opts };
+    this.hover = null;
+    this.legend = h("div", { class: "legend" });
+    this.svg = svg("svg", { class: "chart", tabindex: "0", role: "img" });
+    this.tip = h("div", { class: "chart-tip", hidden: true });
+    this.wrap = h("div", { class: "chart-wrap" }, this.svg, this.tip);
+    el.replaceChildren(this.legend, this.wrap);
+
+    this.svg.addEventListener("pointermove", (e) => this.pointer(e));
+    this.svg.addEventListener("pointerleave", () => this.setHover(null));
+    this.svg.addEventListener("blur", () => this.setHover(null));
+    this.svg.addEventListener("keydown", (e) => {
+      const n = this.times?.length ?? 0;
+      if (!n || !["ArrowLeft", "ArrowRight"].includes(e.key)) return;
+      e.preventDefault();
+      const cur = this.hover ?? n - 1;
+      this.setHover(Math.max(0, Math.min(n - 1, cur + (e.key === "ArrowLeft" ? -1 : 1))));
+    });
+  }
+
+  /** times: Date[]; series: [{name, color (CSS var), values: (number|null)[]}] */
+  update(times, series) {
+    this.times = times;
+    this.series = series;
+    this.draw();
+  }
+
+  setHover(i) {
+    this.hover = i;
+    this.draw();
+  }
+
+  pointer(e) {
+    if (!this.times?.length) return;
+    const rect = this.svg.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) * this.width) / rect.width;
+    const i = Math.round((x - MARGIN.left) / this.step) - this.offset;
+    this.setHover(Math.max(0, Math.min(this.times.length - 1, i)));
+  }
+
+  draw() {
+    const { format, height } = this.opts;
+    const series = this.series ?? [];
+    const n = this.times?.length ?? 0;
+    const W = Math.max(this.wrap.clientWidth, 300);
+    const H = height;
+    const plotW = W - MARGIN.left - MARGIN.right;
+    const plotH = H - MARGIN.top - MARGIN.bottom;
+    this.width = W;
+    this.step = plotW / (HISTORY - 1);
+    this.offset = HISTORY - n; // newest sample on the right edge
+    this.svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    this.svg.setAttribute("height", H);
+
+    const all = series.flatMap((s) => s.values).filter((v) => v !== null);
+    const peak = Math.max(this.opts.minMax ?? 0, ...all);
+    const top = this.opts.max ?? (this.opts.bytes ? niceBytesMax(peak) : niceMax(peak));
+    const X = (i) => MARGIN.left + (i + this.offset) * this.step;
+    const Y = (v) => MARGIN.top + plotH * (1 - Math.min(v, top) / top);
+
+    const nodes = [];
+    // Recessive grid: 4 intervals, labels in muted ink.
+    for (let k = 0; k <= 4; k++) {
+      const v = (top * k) / 4;
+      nodes.push(svg("line", { class: k ? "grid" : "baseline", x1: MARGIN.left, x2: W - MARGIN.right, y1: Y(v), y2: Y(v) }));
+      nodes.push(svg("text", { class: "tick", x: MARGIN.left - 6, y: Y(v) + 4, "text-anchor": "end" }, format(v)));
+    }
+    for (const [i, label] of [[0, "−2 min"], [HISTORY / 2, "−1 min"], [HISTORY - 1, "maintenant"]]) {
+      nodes.push(svg("text", {
+        class: "tick", x: MARGIN.left + i * this.step, y: H - 6,
+        "text-anchor": i === 0 ? "start" : i === HISTORY - 1 ? "end" : "middle",
+      }, label));
+    }
+
+    for (const s of series) {
+      // Gaps (null = no reading, e.g. GPU asleep) break the line.
+      let d = "";
+      let pen = false;
+      s.values.forEach((v, i) => {
+        if (v === null) { pen = false; return; }
+        d += `${pen ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`;
+        pen = true;
+      });
+      if (!d) continue;
+      if (this.opts.area && series.length === 1) {
+        const first = s.values.findIndex((v) => v !== null);
+        nodes.push(svg("path", {
+          class: "area", style: { fill: `var(${s.color})` },
+          d: `${d}L${X(n - 1)},${Y(0)}L${X(first)},${Y(0)}Z`,
+        }));
+      }
+      nodes.push(svg("path", { class: "line", style: { stroke: `var(${s.color})` }, d }));
+    }
+
+    // Direct labels at the line ends (<= 4 series), pushed apart to avoid overlap.
+    if (series.length >= 2 && series.length <= 4) {
+      const ends = series
+        .map((s) => ({ s, v: [...s.values].reverse().find((v) => v !== null) }))
+        .filter((e) => e.v !== undefined)
+        .map((e) => ({ ...e, y: Y(e.v) }))
+        .sort((a, b) => a.y - b.y);
+      for (let k = 1; k < ends.length; k++) ends[k].y = Math.max(ends[k].y, ends[k - 1].y + 13);
+      const overflow = (ends.at(-1)?.y ?? 0) - (MARGIN.top + plotH);
+      for (const e of ends) {
+        if (overflow > 0) e.y -= overflow;
+        nodes.push(svg("text", { class: "end-label", x: W - MARGIN.right + 6, y: e.y + 4 }, e.s.name));
+      }
+    }
+
+    // Crosshair + tooltip.
+    this.tip.hidden = this.hover === null;
+    if (this.hover !== null && n) {
+      const i = this.hover;
+      const x = X(i);
+      nodes.push(svg("line", { class: "crosshair", x1: x, x2: x, y1: MARGIN.top, y2: MARGIN.top + plotH }));
+      for (const s of series) {
+        const v = s.values[i];
+        if (v !== null && v !== undefined) {
+          nodes.push(svg("circle", { class: "dot", cx: x, cy: Y(v), r: 4, style: { fill: `var(${s.color})` } }));
+        }
+      }
+      const ago = Math.round((this.times[n - 1] - this.times[i]) / 1000);
+      this.tip.replaceChildren(
+        h("div", { class: "tip-time" }, ago ? `il y a ${ago} s` : "maintenant"),
+        ...series.map((s) => h("div", { class: "tip-row" },
+          h("span", { class: "key", style: { background: `var(${s.color})` } }),
+          h("strong", {}, s.values[i] === null || s.values[i] === undefined ? "—" : format(s.values[i])),
+          h("span", { class: "muted" }, s.name))),
+      );
+      const left = (x / W) * this.wrap.clientWidth;
+      const right = left > this.wrap.clientWidth / 2;
+      Object.assign(this.tip.style, right
+        ? { left: "", right: `${this.wrap.clientWidth - left + 12}px` }
+        : { right: "", left: `${left + 12}px` });
+    }
+    this.svg.replaceChildren(...nodes);
+
+    // Legend (>= 2 series): line key, name, current value. Text stays in ink colors.
+    this.legend.replaceChildren(...(series.length >= 2 ? series.map((s) => {
+      const last = [...s.values].reverse().find((v) => v !== null);
+      return h("span", { class: "legend-item" },
+        h("span", { class: "key", style: { background: `var(${s.color})` } }),
+        s.name, " ", h("strong", {}, last === undefined ? "—" : format(last)));
+    }) : []));
+    this.svg.setAttribute("aria-label", series.map((s) => {
+      const last = [...s.values].reverse().find((v) => v !== null);
+      return `${s.name} : ${last === undefined ? "aucune donnée" : format(last)}`;
+    }).join(", "));
+  }
 }
 
 // ---------- views ----------
@@ -146,41 +326,136 @@ function showError(target, err) {
 
 // ===== Dashboard =====
 
-const HISTORY = 60; // 60 samples x 2 s = last 2 minutes
-const history = { cpu: [], mem: [] };
+const samples = []; // last HISTORY snapshots, oldest first
 let source = null;
+let charts = null;
 
-function push(list, value) {
-  list.push(value);
-  if (list.length > HISTORY) list.shift();
+// One curve per component, named for humans. A sensor keeps the same color
+// for the whole session (color follows the entity, never its rank).
+const SENSOR_NAMES = {
+  coretemp: "CPU", k10temp: "CPU", zenpower: "CPU", nvme: "SSD NVMe", acpitz: "Carte mère",
+  iwlwifi_1: "Wi-Fi", amdgpu: "GPU", nouveau: "GPU", radeon: "GPU",
+};
+const PREFERRED_LABELS = ["Package id 0", "Tctl", "Composite", "edge"];
+const sensorName = (sensor) => SENSOR_NAMES[sensor] ?? (sensor.startsWith("pch_") ? "Chipset" : sensor);
+
+function temperatureGroups(s) {
+  const groups = new Map();
+  for (const t of s.temperatures) {
+    const name = sensorName(t.sensor);
+    const g = groups.get(name) ?? { preferred: null, max: -Infinity };
+    if (PREFERRED_LABELS.includes(t.label)) g.preferred = t.celsius;
+    g.max = Math.max(g.max, t.celsius);
+    groups.set(name, g);
+  }
+  const out = new Map([...groups].map(([name, g]) => [name, g.preferred ?? g.max]));
+  for (const gpu of s.gpus) if (gpu.temperature_c !== null) out.set("GPU", gpu.temperature_c);
+  return out;
+}
+
+const tempSlots = new Map();
+function tempSlot(name) {
+  if (!tempSlots.has(name)) tempSlots.set(name, `--series-${Math.min(tempSlots.size + 1, 8)}`);
+  return tempSlots.get(name);
+}
+
+// Physical interfaces only: virtual ones (containers, VPN bridges) would
+// count the same traffic twice.
+const VIRTUAL_IF = /^(lo|veth|docker|br-|virbr|vnet|podman|cni|flannel|tun|tap|wg|proton)/;
+
+function sampleOf(s) {
+  const phys = s.network.filter((n) => !VIRTUAL_IF.test(n.name));
+  return {
+    time: new Date(s.time),
+    cpu: s.cpu_percent,
+    mem: (100 * s.memory_used_bytes) / s.memory_total_bytes,
+    swap: s.swap_total_bytes ? (100 * s.swap_used_bytes) / s.swap_total_bytes : null,
+    temps: temperatureGroups(s),
+    rx: phys.reduce((a, n) => a + n.rx_bps, 0),
+    tx: phys.reduce((a, n) => a + n.tx_bps, 0),
+    read: s.disk_read_bps,
+    write: s.disk_write_bps,
+  };
+}
+
+// Status = state, never decoration: reserved colors, always with an icon + label.
+const STATUS = {
+  good: ["✓", "Normal"], warning: ["!", "Élevé"], serious: ["!", "Très élevé"], critical: ["‼", "Critique"],
+};
+function level(value, warn, serious, critical) {
+  if (value === null || value === undefined) return null;
+  return value >= critical ? "critical" : value >= serious ? "serious" : value >= warn ? "warning" : "good";
+}
+
+function tile(label, value, sub, status = null) {
+  return h("div", { class: "tile" },
+    h("div", { class: "tile-head" },
+      h("span", { class: "tile-label" }, label),
+      status ? h("span", { class: `status status-${status}` }, `${STATUS[status][0]} ${STATUS[status][1]}`) : null),
+    h("div", { class: "tile-value" }, value),
+    h("div", { class: "tile-sub" }, sub));
+}
+
+function renderTiles(s, cur) {
+  const cpuTemp = cur.temps.get("CPU") ?? null;
+  const gpu = s.gpus[0];
+  $("tiles").replaceChildren(
+    tile("Processeur", pct(s.cpu_percent), `${num(s.cpu_mhz, " MHz")} · charge ${s.load_average[0].toFixed(2)}`,
+      level(s.cpu_percent, 75, 90, 101)),
+    tile("Mémoire", pct(cur.mem), `${bytes(s.memory_used_bytes)} / ${bytes(s.memory_total_bytes)}`,
+      level(cur.mem, 80, 90, 95)),
+    tile("Temp. CPU", cpuTemp === null ? "—" : `${Math.round(cpuTemp)} °C`,
+      `max. tous capteurs ${Math.round(Math.max(...cur.temps.values()))} °C`, level(cpuTemp, 75, 85, 95)),
+    tile("Carte graphique", gpu ? (gpu.pstate === "suspended" ? "veille" : pct(gpu.utilization_percent)) : "—",
+      gpu ? (gpu.pstate === "suspended" ? "économie d'énergie" : `${num(gpu.temperature_c, " °C")} · ${num(gpu.memory_used_mib)} Mo VRAM`) : "pas de mesure",
+      gpu && gpu.pstate !== "suspended" ? level(gpu.temperature_c, 75, 85, 92) : null),
+    tile("Réseau", `↓ ${rate(cur.rx)}`, `↑ ${rate(cur.tx)}`),
+    tile("Disque", `${rate(cur.read + cur.write)}`, `lect. ${rate(cur.read)} · écr. ${rate(cur.write)}`),
+    tile("Batterie", s.battery_percent === null ? "—" : pct(s.battery_percent),
+      s.battery_percent === null ? "pas de batterie" : s.on_ac ? "sur secteur" : "sur batterie",
+      s.battery_percent !== null && !s.on_ac ? (s.battery_percent < 10 ? "critical" : s.battery_percent < 20 ? "warning" : null) : null),
+    tile("Système", duration(s.uptime_seconds), `${s.process_count} processus`),
+  );
 }
 
 function renderLive(s) {
-  push(history.cpu, s.cpu_percent);
-  const memPct = (100 * s.memory_used_bytes) / s.memory_total_bytes;
-  push(history.mem, memPct);
+  charts ??= {
+    cpu: new LineChart($("chart-cpu"), { format: (v) => `${Math.round(v)} %`, max: 100, area: true }),
+    mem: new LineChart($("chart-mem"), { format: (v) => `${Math.round(v)} %`, max: 100, area: true }),
+    temp: new LineChart($("chart-temp"), { format: (v) => `${Math.round(v)} °C`, max: 100 }),
+    net: new LineChart($("chart-net"), { format: rate, bytes: true, minMax: 16 * 1024 }),
+    disk: new LineChart($("chart-disk"), { format: rate, bytes: true, minMax: 128 * 1024 }),
+  };
+  const cur = sampleOf(s);
+  samples.push(cur);
+  if (samples.length > HISTORY) samples.shift();
+  const times = samples.map((x) => x.time);
+  const col = (key) => samples.map((x) => x[key]);
 
-  $("live-cpu").replaceChildren(
-    h("div", { class: "big" }, pct(s.cpu_percent)),
-    h("div", { class: "muted" }, `${num(s.cpu_mhz, " MHz")} · charge ${s.load_average.map((l) => l.toFixed(2)).join(" / ")}`),
-    h("div", { class: "cores", title: "Utilisation par cœur" },
-      s.cpu_per_core.map((c, i) => h("div", { class: "core", title: `Cœur ${i} : ${pct(c)}` },
-        h("div", { style: { height: `${c}%` } })))),
-    sparkline(history.cpu),
-  );
+  renderTiles(s, cur);
+  charts.cpu.update(times, [{ name: "CPU", color: "--series-1", values: col("cpu") }]);
+  charts.mem.update(times, [
+    { name: "RAM", color: "--series-1", values: col("mem") },
+    ...(cur.swap !== null ? [{ name: "Swap", color: "--series-2", values: col("swap") }] : []),
+  ]);
+  const tempNames = [...new Set(samples.flatMap((x) => [...x.temps.keys()]))];
+  tempNames.forEach(tempSlot); // assign colors in first-seen order
+  charts.temp.update(times, tempNames.map((name) => ({
+    name, color: tempSlot(name), values: samples.map((x) => x.temps.get(name) ?? null),
+  })));
+  charts.net.update(times, [
+    { name: "Reçu ↓", color: "--series-1", values: col("rx") },
+    { name: "Envoyé ↑", color: "--series-2", values: col("tx") },
+  ]);
+  charts.disk.update(times, [
+    { name: "Lecture", color: "--series-1", values: col("read") },
+    { name: "Écriture", color: "--series-2", values: col("write") },
+  ]);
 
-  $("live-mem").replaceChildren(
-    h("div", { class: "big" }, pct(memPct)),
-    meter("RAM", memPct, `${bytes(s.memory_used_bytes)} / ${bytes(s.memory_total_bytes)}`),
-    s.swap_total_bytes
-      ? meter("Swap", (100 * s.swap_used_bytes) / s.swap_total_bytes, `${bytes(s.swap_used_bytes)} / ${bytes(s.swap_total_bytes)}`)
-      : null,
-    sparkline(history.mem),
-  );
-
-  $("live-temps").replaceChildren(...(s.temperatures.length
-    ? s.temperatures.map((t) => meter(t.label, t.celsius, `${t.celsius.toFixed(0)} °C`, { warn: 75, crit: 90 }))
-    : [h("p", { class: "muted" }, "Aucun capteur lisible")]));
+  $("live-cores").replaceChildren(
+    h("div", { class: "muted" }, `Par cœur (${s.cpu_per_core.length})`),
+    h("div", { class: "cores" }, s.cpu_per_core.map((c, i) => h("div", { class: "core", title: `Cœur ${i} : ${pct(c)}` },
+      h("div", { style: { height: `${c}%` } })))));
 
   $("live-gpu").replaceChildren(...(s.gpus.length
     ? s.gpus.map((g) => h("div", {},
@@ -195,22 +470,6 @@ function renderLive(s) {
           kv([["Consommation", g.power_w !== null ? `${g.power_w.toFixed(1)} W` : null], ["État", g.pstate]]),
         ]))
     : [h("p", { class: "muted" }, "Pas de GPU NVIDIA (les autres GPU n'exposent pas ces mesures sans root).")]));
-
-  $("live-io").replaceChildren(
-    kv([
-      ...s.network.filter((n) => n.rx_bps || n.tx_bps || !n.name.startsWith("veth"))
-        .map((n) => [n.name, `↓ ${rate(n.rx_bps)}  ↑ ${rate(n.tx_bps)}`]),
-      ["Disque", `lecture ${rate(s.disk_read_bps)} · écriture ${rate(s.disk_write_bps)}`],
-    ]),
-  );
-
-  $("live-sys").replaceChildren(kv([
-    ["Allumé depuis", duration(s.uptime_seconds)],
-    ["Processus", String(s.process_count)],
-    ["Batterie", s.battery_percent !== null
-      ? `${pct(s.battery_percent)} ${s.on_ac ? "(sur secteur)" : "(sur batterie)"}` : null],
-    ["Mis à jour", fmtDate(s.time)],
-  ]));
 
   $("proc-count").textContent = `voir les ${s.process_count} processus →`;
   table($("live-procs"), ["PID", "Nom", "Utilisateur", "CPU", "Mémoire"],

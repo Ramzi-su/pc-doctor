@@ -118,8 +118,6 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
 .cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(14px, 1fr)); gap: 3px; height: 40px; margin: 8px 0; }
 .cores .core { background: var(--track); border-radius: 2px; display: flex; align-items: flex-end; }
 .cores .core div { width: 100%; background: var(--notice); border-radius: 2px; transition: height .4s; }
-svg.spark { width: 100%; height: 44px; display: block; }
-svg.spark polyline { fill: none; stroke: var(--notice); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 
 ul.findings { list-style: none; margin: 0; padding: 0; }
 ul.findings li { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }
@@ -168,3 +166,56 @@ button:disabled { opacity: .5; cursor: wait; }
   border-radius: 8px; color: #fff; background: var(--notice); box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
 }
 #toast.ok { background: var(--ok); } #toast.err { background: var(--err); }
+
+/* ===== Dashboard: tiles and charts ===== */
+/* Validated categorical palette (CVD-safe in this order) and reserved status
+   colors. Dark mode uses its own steps, not an automatic inversion. */
+:root {
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-8: #e34948;
+  --status-good: #0ca30c; --status-warning: #fab219; --status-serious: #ec835a; --status-critical: #d03b3b;
+  --grid: #e1e0d9; --axis: #c3c2b7; --tick: #898781;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #0ca30c; --series-7: #9085e9; --series-8: #e66767;
+    --grid: #2c2c2a; --axis: #383835;
+  }
+}
+#view-dashboard .grid { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tile { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.tile-head { display: flex; align-items: center; gap: 6px; min-height: 18px; }
+.tile-label { color: var(--muted); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-value { font-size: 24px; font-weight: 700; margin: 2px 0; white-space: nowrap; }
+.tile-sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status { flex: none; font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 4px; color: #fff; }
+.status-good { background: var(--status-good); }
+.status-warning { background: var(--status-warning); color: #0b0b0b; }
+.status-serious { background: var(--status-serious); color: #0b0b0b; }
+.status-critical { background: var(--status-critical); }
+
+.chart-wrap { position: relative; }
+svg.chart { display: block; width: 100%; overflow: visible; outline: none; }
+svg.chart:focus-visible { outline: 2px solid var(--notice); outline-offset: 2px; border-radius: 4px; }
+svg.chart .grid { stroke: var(--grid); stroke-width: 1; }
+svg.chart .baseline { stroke: var(--axis); stroke-width: 1; }
+svg.chart .tick { fill: var(--tick); font: 11px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+svg.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+svg.chart .area { opacity: .12; }
+svg.chart .end-label { fill: var(--muted); font: 11px system-ui, sans-serif; }
+svg.chart .crosshair { stroke: var(--tick); stroke-width: 1; }
+svg.chart .dot { stroke: var(--panel); stroke-width: 2; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; min-height: 18px; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+.legend-item strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.key { display: inline-block; width: 12px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 5px; }
+.chart-tip {
+  position: absolute; top: 4px; pointer-events: none; z-index: 2; min-width: 130px; padding: 6px 9px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .15); font-size: 12px;
+}
+.tip-time { color: var(--muted); margin-bottom: 2px; }
+.tip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tip-row strong { font-variant-numeric: tabular-nums; }
+.hint { margin-top: 12px; font-size: 12px; }
