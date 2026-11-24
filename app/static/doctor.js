@@ -28,7 +28,7 @@ async function api(url, options = {}) {
   const res = await fetch(url, options);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const detail = Array.isArray(body?.detail) ? body.detail.map((d) => d.msg).join(" ; ") : body?.detail;
+    const detail = Array.isArray(body?.detail) ? body.detail.map((d) => d.msg.replace(/^Value error, /, "")).join(" ; ") : body?.detail;
     throw new Error(detail || `HTTP ${res.status}`);
   }
   return body;
@@ -955,32 +955,173 @@ function portActions(p) {
   return buttons.length ? buttons : h("span", { class: "muted" }, p.pid ? "—" : "révèle d'abord le programme");
 }
 
+const POLICY_LABELS = { allow: "allow : autoriser", deny: "deny : bloquer", reject: "reject : refuser" };
+const POLICY_HELP = {
+  incoming: ["Entrant", "connexions qui arrivent vers ce PC"],
+  outgoing: ["Sortant", "connexions que ce PC ouvre (navigation, mises à jour)"],
+  routed: ["Routé", "trafic que ce PC fait passer d'un réseau à un autre (VM, partage de connexion)"],
+};
+const LOG_LABELS = {
+  off: "désactivée", low: "faible : paquets bloqués (limité)", medium: "moyenne : + paquets autorisés suspects",
+  high: "élevée : presque tout (bruyant)", full: "complète : tout, sans limite (très bruyant)",
+};
+const ANY = new Set(["0.0.0.0/0", "::/0", "any"]);
+let fwRenderedKey = "";
+let fwRulesKey = "";
+
+function firewallSelect(name, labels, current, onChange) {
+  const select = h("select", { name, onchange: (e) => onChange(e.currentTarget) },
+    current ? null : h("option", { value: "" }, "inconnue"),
+    Object.entries(labels).map(([value, label]) => h("option", { value, selected: value === current }, label)));
+  return select;
+}
+
+function policyConfirm(direction, policy) {
+  const [label, help] = POLICY_HELP[direction];
+  let text = `Politique par défaut « ${label} » (${help}) : ${policy} ?\n\n` +
+    "Elle s'applique à tout ce qu'aucune règle ne mentionne.";
+  if (direction === "outgoing" && policy !== "allow")
+    text += "\n\n⚠️ Sans règles « allow out », ce PC ne pourra plus rien ouvrir : plus de navigation, " +
+      "plus de DNS, plus de mises à jour. N'utilise ça que si tu sais quelles règles ajouter.";
+  if (direction === "incoming" && policy === "allow")
+    text += "\n\n⚠️ Tous les ports réseau deviennent joignables : le pare-feu ne protège presque plus rien.";
+  return text;
+}
+
 function renderFirewall() {
   const card = $("firewall");
+  const key = JSON.stringify([firewall?.installed, firewall?.enabled, firewall?.policies, firewall?.logging]);
+  if (key === fwRenderedKey) return renderFirewallRules();
+  fwRenderedKey = key;
   if (!firewall?.installed) {
-    card.replaceChildren(h("strong", {}, "Pare-feu : "), "ufw n'est pas installé.");
+    card.replaceChildren("ufw n'est pas installé (sudo apt install ufw).");
+    $("fw-settings").replaceChildren();
     return;
   }
   card.replaceChildren(
-    h("strong", {}, "Pare-feu (ufw) : "),
     firewall.enabled ? tag("activé", "green") : tag("désactivé", "orange"),
     h("span", { class: "muted" }, firewall.enabled
-      ? " Les connexions entrantes non autorisées sont bloquées."
-      : " Tous les ports « réseau » ci-dessous sont joignables par les autres machines."),
+      ? " Le trafic est filtré selon les politiques et les règles ci-dessous."
+      : " Rien n'est filtré : tous les ports « réseau » ci-dessous sont joignables."),
     h("button", {
       type: "button", class: firewall.enabled ? "small" : "small primary",
       onclick: async (e) => {
         const enable = !firewall.enabled;
         const ok = await runAction("/api/firewall/enable", { enabled: enable }, enable
-          ? "Activer le pare-feu ?\n\nPar défaut, ufw bloque toutes les connexions ENTRANTES " +
-            "(SSH depuis une autre machine, partage réseau…) et laisse passer les sortantes " +
-            "(navigation, mises à jour). Ta navigation n'est pas affectée."
+          ? `Activer le pare-feu ?\n\nEntrant : ${firewall.policies.incoming ?? "?"}, ` +
+            `sortant : ${firewall.policies.outgoing ?? "?"}. Avec les réglages habituels ` +
+            "(entrant deny, sortant allow), ta navigation n'est pas affectée."
           : "Désactiver le pare-feu ?\n\nTous les ports réseau redeviendront joignables.", e.currentTarget);
         if (ok) views.ports.load();
       },
     }, firewall.enabled ? "Désactiver" : "Activer le pare-feu"),
   );
+  const revert = () => { fwRenderedKey = ""; renderFirewall(); };
+  $("fw-settings").replaceChildren(
+    ...Object.entries(POLICY_HELP).map(([direction, [label, help]]) => h("label", { title: help },
+      h("span", {}, `Par défaut — ${label}`),
+      firewallSelect(direction, POLICY_LABELS, firewall.policies[direction], async (select) => {
+        const ok = await runAction("/api/firewall/default", { direction, policy: select.value },
+          policyConfirm(direction, select.value), select);
+        ok ? views.ports.load() : revert();
+      }))),
+    h("label", { title: "Les paquets journalisés apparaissent dans l'onglet Journal ([UFW BLOCK])" },
+      h("span", {}, "Journalisation"),
+      firewallSelect("logging", LOG_LABELS, firewall.logging, async (select) => {
+        const noisy = ["high", "full"].includes(select.value);
+        const ok = await runAction("/api/firewall/logging", { level: select.value },
+          `Journalisation du pare-feu : ${LOG_LABELS[select.value]} ?` +
+          (noisy ? "\n\n⚠️ Ce niveau remplit vite le journal système." : ""), select);
+        ok ? views.ports.load() : revert();
+      })),
+  );
+  renderFirewallRules();
 }
+
+const where = (address, port, app) =>
+  `${ANY.has(address) ? "partout" : address}${app ? ` (app ${app})` : port ? ` port ${port}` : ""}`;
+
+function ruleCommand(r) {
+  const dir = r.route ? "routé" : r.direction === "in" ? "entrant" : "sortant";
+  const iface = [r.interface_in && `in ${r.interface_in}`, r.interface_out && `out ${r.interface_out}`]
+    .filter(Boolean).join(", ");
+  return `${r.action} ${dir}${iface ? ` (${iface})` : ""} ${r.protocol === "any" ? "" : r.protocol + " "}` +
+    `de ${where(r.from_address, r.from_port, r.from_app)} vers ${where(r.to_address, r.to_port, r.to_app)}`;
+}
+
+function renderFirewallRules() {
+  const key = firewall?.rules_read_at ?? "";
+  if (key === fwRulesKey) return;
+  fwRulesKey = key;
+  const target = $("fw-rules");
+  if (!firewall?.rules) return;
+  $("fw-read-at").textContent = `Lues en root le ${fmtDate(firewall.rules_read_at)} ` +
+    "(une modification faite dans un terminal n'apparaît qu'à la prochaine lecture).";
+  $("fw-reveal").textContent = "Relire les règles (root)";
+  target.hidden = false;
+  const ACTION_COLORS = { allow: "green", limit: "blue", deny: "red", reject: "red" };
+  table(target, ["Action", "Direction", "Protocole", "Source", "Destination", "IP", "Commentaire", ""],
+    firewall.rules.map((r) => h("tr", {},
+      h("td", {}, tag(r.action, ACTION_COLORS[r.action] ?? ""), r.log ? tag(r.log) : null),
+      h("td", {}, r.route ? "routé" : r.direction === "in" ? "↓ entrant" : "↑ sortant",
+        r.interface_in || r.interface_out
+          ? h("div", { class: "muted mono" }, [r.interface_in, r.interface_out].filter(Boolean).join(" → ")) : null),
+      h("td", {}, r.protocol === "any" ? "tous" : r.protocol),
+      h("td", { class: "mono" }, where(r.from_address, r.from_port, r.from_app)),
+      h("td", { class: "mono" }, where(r.to_address, r.to_port, r.to_app)),
+      h("td", {}, r.ipv6 ? "v6" : "v4"),
+      h("td", {}, r.comment || h("span", { class: "muted" }, "—")),
+      h("td", { class: "actions" }, h("button", {
+        type: "button", class: "small danger",
+        onclick: async (e) => {
+          const both = ANY.has(r.from_address) && ANY.has(r.to_address);
+          if (await runAction("/api/firewall/rules/delete", { id: r.id },
+            `Supprimer la règle « ${ruleCommand(r)} » ?` +
+            (both ? "\n\nLa même règle en IPv4 et en IPv6 sera supprimée ensemble." : ""), e.currentTarget))
+            views.ports.load();
+        },
+      }, "Supprimer")))));
+}
+
+// Live preview of the command the form will build (the server builds the
+// real one again from the validated fields).
+function formRule(form) {
+  const data = Object.fromEntries(new FormData(form));
+  return {
+    action: data.action, direction: data.direction, protocol: data.protocol,
+    from_address: data.from_address.trim() || "any", from_port: data.from_port.trim(),
+    to_address: data.to_address.trim() || "any", to_port: data.to_port.trim(),
+    log: data.log === "on", comment: data.comment.trim(),
+  };
+}
+function previewRule() {
+  const r = formRule($("fw-add"));
+  $("fw-preview").textContent = ["ufw", r.action, r.direction, r.log && "log",
+    r.protocol !== "any" && `proto ${r.protocol}`, `from ${r.from_address}`, r.from_port && `port ${r.from_port}`,
+    `to ${r.to_address}`, r.to_port && `port ${r.to_port}`, r.comment && `comment '${r.comment}'`]
+    .filter(Boolean).join(" ");
+}
+$("fw-add").addEventListener("input", previewRule);
+$("fw-add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const r = formRule(form);
+  let text = `Ajouter cette règle ?\n\n${$("fw-preview").textContent}`;
+  if (r.action === "allow" && r.direction === "in" && ANY.has(r.from_address) && !r.to_port)
+    text += "\n\n⚠️ Sans port, cette règle ouvre TOUS les ports à tout le monde.";
+  if (r.action !== "allow" && r.action !== "limit" && r.direction === "out" && ANY.has(r.to_address) && !r.to_port)
+    text += "\n\n⚠️ Sans port ni destination, cette règle coupe tout le trafic sortant (internet).";
+  if (!firewall?.enabled) text += "\n\nLe pare-feu est désactivé : la règle ne s'appliquera qu'une fois activé.";
+  if (await runAction("/api/firewall/rules", r, text, form.querySelector("button[type=submit]"))) {
+    form.reset();
+    previewRule();
+    views.ports.load();
+  }
+});
+previewRule();
+$("fw-reveal").addEventListener("click", async (e) => {
+  if (await runAction("/api/firewall/rules/reveal", undefined, null, e.currentTarget)) views.ports.load();
+});
 
 function renderPorts() {
   const onlyExposed = $("ports-exposed").checked;

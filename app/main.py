@@ -14,7 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from app import journal
 from app.models import LogQuery, LogResult, Priority
@@ -301,6 +301,45 @@ class FirewallEnableRequest(BaseModel):
     enabled: bool
 
 
+class FirewallDefaultRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    direction: actions.PolicyDirection
+    policy: actions.Policy
+
+
+class FirewallLoggingRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    level: actions.LogLevel
+
+
+# AfterValidator runs our own check after Pydantic's type check: a bad value
+# becomes a 422 with the reason, before any code (or password dialog) runs.
+Ports = Annotated[str, Field(max_length=100), AfterValidator(actions.check_ports)]
+Address = Annotated[str, Field(max_length=50), AfterValidator(actions.check_address)]
+
+
+class FirewallAddRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    action: actions.RuleAction = "allow"
+    direction: actions.Direction = "in"
+    protocol: actions.RuleProtocol = "any"
+    from_address: Address = "any"
+    from_port: Ports = ""
+    to_address: Address = "any"
+    to_port: Ports = ""
+    log: bool = False
+    comment: Annotated[str, Field(max_length=60), AfterValidator(actions.check_comment)] = ""
+
+
+class FirewallDeleteRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    id: str = Field(pattern=r"^[0-9a-f]{16}$")
+
+
 @app.post("/api/processes/{pid}/kill", dependencies=[Depends(require_app_header)])
 async def kill_process(pid: Annotated[int, PathParam(gt=2, le=PID_MAX)],
                        body: KillRequest) -> ActionResult:
@@ -330,6 +369,33 @@ async def firewall_rule(body: FirewallRuleRequest) -> ActionResult:
 @app.post("/api/firewall/enable", dependencies=[Depends(require_app_header)])
 async def firewall_enable(body: FirewallEnableRequest) -> ActionResult:
     return await _privileged(actions.firewall_enable, body.enabled)
+
+
+@app.post("/api/firewall/default", dependencies=[Depends(require_app_header)])
+async def firewall_default(body: FirewallDefaultRequest) -> ActionResult:
+    return await _privileged(actions.firewall_default, body.direction, body.policy)
+
+
+@app.post("/api/firewall/logging", dependencies=[Depends(require_app_header)])
+async def firewall_logging(body: FirewallLoggingRequest) -> ActionResult:
+    return await _privileged(actions.firewall_logging, body.level)
+
+
+@app.post("/api/firewall/rules/reveal", dependencies=[Depends(require_app_header)])
+async def reveal_firewall_rules() -> ActionResult:
+    return await _privileged(actions.reveal_firewall_rules)
+
+
+@app.post("/api/firewall/rules", dependencies=[Depends(require_app_header)])
+async def add_firewall_rule(body: FirewallAddRequest) -> ActionResult:
+    return await _privileged(actions.add_firewall_rule, body.action, body.direction, body.protocol,
+                             body.from_address, body.from_port, body.to_address, body.to_port,
+                             body.log, body.comment)
+
+
+@app.post("/api/firewall/rules/delete", dependencies=[Depends(require_app_header)])
+async def delete_firewall_rule(body: FirewallDeleteRequest) -> ActionResult:
+    return await _privileged(actions.delete_firewall_rule, body.id)
 
 
 # ---------- hardware tests ----------

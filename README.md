@@ -9,7 +9,7 @@ Local web dashboard to monitor and diagnose a Linux PC, **as a normal user (no r
 | Tests | CPU, RAM, disk speed + integrity, SMART, GPU, network, battery, with live temperature/frequency/fan charts |
 | Matériel | machine, BIOS, CPU, disks, partitions, battery health, GPUs (with NVIDIA details), USB devices |
 | Réseau | interfaces with their physical card (vendor, driver, firmware, PCI slot), MAC, IPs, traffic |
-| Ports | listening sockets, owning program (root "reveal"), stop/disable the systemd service, ufw firewall block/unblock |
+| Ports | listening sockets, owning program (root "reveal"), stop/disable the systemd service, ufw firewall: on/off, default policies, logging, incoming/outgoing rules |
 | Utilisateurs & groupes | accounts, admins, sensitive groups, login history |
 | Droits & SUID | permission audit of sensitive files, world-writable files, SUID/SGID scan |
 | Journal | systemd journal with filters (software, priority, time range, crashes) |
@@ -26,6 +26,7 @@ Local web dashboard to monitor and diagnose a Linux PC, **as a normal user (no r
 | ![Process tree](docs/screenshots/04-processes-tree.png) Every process as a tree, with stop / force actions | ![Ports and firewall](docs/screenshots/05-ports-firewall.png) Listening ports, systemd units, ufw |
 | ![Hardware](docs/screenshots/06-hardware.png) Hardware inventory | ![Network](docs/screenshots/07-network.png) Network cards and their hardware |
 | ![Permissions and SUID](docs/screenshots/08-permissions-suid.png) Sensitive file permissions and SUID audit | ![Journal](docs/screenshots/09-journal.png) systemd journal with filters |
+| ![Firewall](docs/screenshots/10-firewall.png) ufw: default policies, logging, rules and rule builder (example rules) | |
 
 Personal data (user name, MAC and private IP addresses) is masked in these images by
 `scripts/portfolio-screenshots.mjs`, which can regenerate them.
@@ -54,6 +55,20 @@ card's state. Linux can only test the RAM it lends to a program: for a full RAM 
 The server always runs as your user. Killing another user's process, revealing port owners,
 stopping a service, reading SMART data and managing ufw each open the **system password dialog**
 (polkit) for that single action; the password never goes through PC Doctor.
+
+### Firewall (ufw)
+
+- **On / off**, **default policies** (incoming, outgoing, routed: allow / deny / reject) and
+  **logging level** (off → full) are read without root from `/etc/ufw/ufw.conf` and
+  `/etc/default/ufw`; changing them asks for the password.
+- **Rules** live in root-only files (`/etc/ufw/user.rules`, `user6.rules`): "Afficher les règles"
+  reads them once as root. Every firewall change runs `ufw` and re-reads the rules in the same
+  root call, so one password both changes the firewall and refreshes the list.
+- **Add a rule**: action, direction (in / out), protocol, source / destination (IP or CIDR),
+  ports (`22`, `8000:8100`, `80,443`), logging and comment. Every field is validated by Pydantic
+  and again before running ufw (argument list, no shell).
+- **Delete a rule**: the page only sends the rule's id; the `ufw delete …` command is rebuilt
+  from the rules root read, never from text sent by the page.
 
 ## What needs root (shown as "nécessite root")
 

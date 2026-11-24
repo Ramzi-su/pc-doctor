@@ -55,3 +55,31 @@ print(json.dumps(owners))
 
 def command(code: str, *args: str) -> list[str]:
     return [PYTHON, "-I", "-S", "-c", code, *args]
+
+# argv: optional ufw arguments (built by actions.py, never by the page).
+# Runs `ufw <args>` if any, then prints the rules as JSON, so one password
+# both changes the firewall and shows the result. Always exits 0: ufw's own
+# exit code is in the JSON, apart from pkexec's 126/127.
+# The rules files are root-only (rw-r-----): we keep the "### tuple ###"
+# lines, the machine format ufw itself reads them back from.
+UFW_THEN_RULES = r"""
+import json, subprocess, sys
+out = {"returncode": 0, "stdout": "", "stderr": ""}
+if len(sys.argv) > 1:
+    try:
+        p = subprocess.run(["/usr/sbin/ufw", *sys.argv[1:]], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=60,
+                           env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"})
+        out.update(returncode=p.returncode, stdout=p.stdout[-2000:], stderr=p.stderr[-2000:])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        out.update(returncode=1, stderr=str(exc))
+rules = {}
+for name in ("user.rules", "user6.rules"):
+    try:
+        with open("/etc/ufw/" + name) as f:
+            rules[name] = [line.strip()[13:].strip() for line in f if line.startswith("### tuple ###")]
+    except OSError:
+        rules[name] = []
+out["rules"] = rules
+print(json.dumps(out))
+"""

@@ -24,7 +24,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: v
 section { margin-bottom: 18px; }
 label { display: block; margin: 4px 0; }
 label.check { display: flex; gap: 6px; align-items: center; }
-input[type=search], select, input[type=datetime-local] {
+input[type=search], input[type=text], select, input[type=datetime-local] {
   width: 100%; padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--text); font: inherit;
 }
@@ -164,8 +164,20 @@ td.actions { white-space: nowrap; }
 td.actions button { margin: 1px 2px; }
 button.danger { border-color: var(--err); color: var(--err); }
 button:disabled { opacity: .5; cursor: wait; }
-.card.firewall { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-.card.firewall button { margin-left: auto; }
+.fw-panel { margin-bottom: 12px; }
+.fw-status { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.fw-status button { margin-left: auto; }
+.fw-settings, .fw-form {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 14px; margin: 10px 0;
+}
+.fw-settings label > span, .fw-form label { font-size: 12px; color: var(--muted); }
+.fw-settings label > span { display: block; }
+.fw-form label > select, .fw-form label > input[type=text] { margin-top: 2px; font-size: 14px; color: var(--text); }
+.fw-form label.check { align-self: end; }
+.fw-form-end { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+#fw-preview { overflow-wrap: anywhere; }
+.fw-add summary { cursor: pointer; font-weight: 600; margin-top: 10px; }
+#fw-rules { margin-top: 4px; }
 #toast {
   position: fixed; right: 16px; bottom: 16px; z-index: 10; max-width: 460px; padding: 10px 14px;
   border-radius: 8px; color: #fff; background: var(--notice); box-shadow: 0 4px 16px rgba(0, 0, 0, .25);

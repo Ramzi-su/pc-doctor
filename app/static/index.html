@@ -97,7 +97,54 @@
       <button type="button" id="ports-reveal" class="primary">Révéler tous les programmes (root)</button>
       <span class="muted">Sans root, le nom du programme n'est visible que pour les tiens.</span>
     </div>
-    <div class="card firewall" id="firewall"></div>
+    <section class="card fw-panel" aria-labelledby="fw-title">
+      <h2 id="fw-title">Pare-feu (ufw)</h2>
+      <div class="fw-status" id="firewall"></div>
+      <!-- Re-rendered only when the values change, so an open <select> is not reset every 5 s. -->
+      <div class="fw-settings" id="fw-settings"></div>
+      <h3>Règles</h3>
+      <div class="toolbar">
+        <button type="button" id="fw-reveal">Afficher les règles (root)</button>
+        <span class="muted" id="fw-read-at">Les fichiers de règles ne sont lisibles qu'en root.</span>
+      </div>
+      <table class="data" id="fw-rules" hidden></table>
+      <details class="fw-add">
+        <summary>Ajouter une règle</summary>
+        <form id="fw-add" class="fw-form" novalidate>
+          <label>Action
+            <select name="action" title="deny jette le paquet sans répondre ; reject répond « refusé » ; limit autorise mais bloque une adresse après 6 connexions en 30 s (anti force brute)">
+              <option value="allow">allow : autoriser</option>
+              <option value="deny" selected>deny : bloquer</option>
+              <option value="reject">reject : refuser</option>
+              <option value="limit">limit : anti force brute</option>
+            </select>
+          </label>
+          <label>Direction
+            <select name="direction">
+              <option value="in">Entrant (vers ce PC)</option>
+              <option value="out">Sortant (depuis ce PC)</option>
+            </select>
+          </label>
+          <label>Protocole
+            <select name="protocol">
+              <option value="any">tcp et udp</option>
+              <option value="tcp">tcp</option>
+              <option value="udp">udp</option>
+            </select>
+          </label>
+          <label>Source <input type="text" name="from_address" placeholder="any, 192.168.1.0/24…" maxlength="50" spellcheck="false"></label>
+          <label>Port source <input type="text" name="from_port" placeholder="(aucun)" maxlength="100" spellcheck="false"></label>
+          <label>Destination <input type="text" name="to_address" placeholder="any, 1.1.1.1…" maxlength="50" spellcheck="false"></label>
+          <label>Port destination <input type="text" name="to_port" placeholder="22, 8000:8100, 80,443" maxlength="100" spellcheck="false"></label>
+          <label>Commentaire <input type="text" name="comment" placeholder="ex. ssh maison" maxlength="60"></label>
+          <label class="check"><input type="checkbox" name="log"> Journaliser les paquets de cette règle</label>
+          <div class="fw-form-end">
+            <code class="muted" id="fw-preview"></code>
+            <button type="submit" class="primary">Ajouter (root)</button>
+          </div>
+        </form>
+      </details>
+    </section>
     <table class="data" id="ports"></table>
   </div>
 

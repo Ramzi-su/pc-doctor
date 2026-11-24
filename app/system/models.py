@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -309,9 +310,43 @@ class ActionResult(BaseModel):
     privileged: bool  # True when the system password dialog was used
 
 
+FirewallPolicy = Literal["allow", "deny", "reject"]
+FirewallLogging = Literal["off", "low", "medium", "high", "full"]
+
+
+class FirewallRule(BaseModel):
+    """One ufw rule, read from the "### tuple ###" lines of user(6).rules."""
+    id: str  # fingerprint of the line: the page sends it back to delete the rule
+    action: str  # allow, deny, reject, limit
+    direction: str  # in, out
+    route: bool = False  # forwarded traffic (ufw route ...)
+    log: str = ""  # "", "log" or "log-all"
+    protocol: str  # tcp, udp, any…
+    to_address: str
+    to_port: str = ""
+    to_app: str = ""
+    from_address: str
+    from_port: str = ""
+    from_app: str = ""
+    interface_in: str = ""
+    interface_out: str = ""
+    ipv6: bool
+    comment: str = ""
+
+
+class FirewallPolicies(BaseModel):
+    incoming: FirewallPolicy | None = None
+    outgoing: FirewallPolicy | None = None
+    routed: FirewallPolicy | None = None
+
+
 class FirewallStatus(BaseModel):
     installed: bool
     enabled: bool
+    policies: FirewallPolicies = FirewallPolicies()
+    logging: str | None = None  # off, low… (on = low for old configs)
+    rules: list[FirewallRule] | None = None  # None until read once as root
+    rules_read_at: datetime | None = None
 
 
 # ---------- hardware tests ----------

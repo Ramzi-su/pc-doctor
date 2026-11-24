@@ -16,9 +16,13 @@ Security rules:
   the page (the page sends a port number, not a unit name).
 """
 
+import hashlib
+import ipaddress
 import json
 import os
+import re
 import signal
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -26,7 +30,7 @@ from typing import Literal
 import psutil
 
 from app.system import network, procnet, root_helpers, runner
-from app.system.models import ActionResult, FirewallStatus
+from app.system.models import ActionResult, FirewallPolicies, FirewallRule, FirewallStatus
 from app.system.processes import is_protected
 from app.system.runner import CommandError
 
@@ -194,12 +198,150 @@ def stop_port_service(protocol: Protocol, port: int, disable: bool,
 
 
 # ---------- firewall ----------
+#
+# Every ufw command runs through root_helpers.UFW_THEN_RULES: one password
+# changes the firewall *and* reads the rules back (their files are root-only),
+# so the list on the page is always the one ufw just wrote.
 
-def firewall_status(conf: Path = UFW_CONF) -> FirewallStatus:
-    """ufw.conf is world-readable: no root needed to know if ufw is on."""
-    text = runner.read_text(conf) or ""
-    enabled = any(line.strip().lower() == "enabled=yes" for line in text.splitlines())
-    return FirewallStatus(installed=Path(UFW).exists(), enabled=enabled)
+UFW_DEFAULTS = Path("/etc/default/ufw")
+POLICY_NAMES = {"ACCEPT": "allow", "DROP": "deny", "REJECT": "reject"}
+POLICY_KEYS = {"incoming": "DEFAULT_INPUT_POLICY", "outgoing": "DEFAULT_OUTPUT_POLICY",
+               "routed": "DEFAULT_FORWARD_POLICY"}
+
+Policy = Literal["allow", "deny", "reject"]
+PolicyDirection = Literal["incoming", "outgoing", "routed"]
+LogLevel = Literal["off", "low", "medium", "high", "full"]
+RuleAction = Literal["allow", "deny", "reject", "limit"]
+Direction = Literal["in", "out"]
+RuleProtocol = Literal["tcp", "udp", "any"]
+
+ANY_ADDRESSES = {"0.0.0.0/0", "::/0", "any"}
+MAX_PORTS = 15  # iptables multiport limit (a range counts as two)
+PORTS_RE = re.compile(r"\d{1,5}(:\d{1,5})?(,\d{1,5}(:\d{1,5})?)*")
+# Letters (accents included), digits, space, . _ - ; not starting with "-"
+# so ufw can never read it as an option.
+COMMENT_RE = re.compile(r"[^\W_][\w .-]{0,59}")
+
+
+def read_key_values(path: Path) -> dict[str, str]:
+    """KEY=value lines of a shell-style config file (quotes removed)."""
+    values = {}
+    for line in (runner.read_text(path) or "").splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and not key.startswith("#"):
+            values[key.strip()] = value.strip().strip("\"'")
+    return values
+
+
+class FirewallRules:
+    """Last rules read as root (shared by all requests, so locked)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.rules: list[FirewallRule] | None = None
+        self.read_at: datetime | None = None
+
+    def update(self, rules: list[FirewallRule]) -> None:
+        with self._lock:
+            self.rules, self.read_at = rules, datetime.now().astimezone()
+
+    def get(self) -> tuple[list[FirewallRule] | None, datetime | None]:
+        with self._lock:
+            return self.rules, self.read_at
+
+    def find(self, rule_id: str) -> FirewallRule | None:
+        with self._lock:
+            return next((r for r in self.rules or [] if r.id == rule_id), None)
+
+
+firewall_rules = FirewallRules()
+
+
+def firewall_status(conf: Path = UFW_CONF, defaults: Path = UFW_DEFAULTS) -> FirewallStatus:
+    """ufw.conf and /etc/default/ufw are world-readable: no root needed."""
+    main = read_key_values(conf)
+    policies = read_key_values(defaults)
+    level = main.get("LOGLEVEL", "").lower() or None
+    rules, read_at = firewall_rules.get()
+    return FirewallStatus(
+        installed=Path(UFW).exists(),
+        enabled=main.get("ENABLED", "").lower() == "yes",
+        policies=FirewallPolicies(**{
+            name: POLICY_NAMES.get(policies.get(key, "").upper()) for name, key in POLICY_KEYS.items()}),
+        logging="low" if level == "on" else level,
+        rules=rules, rules_read_at=read_at,
+    )
+
+
+def parse_tuple(line: str, ipv6: bool) -> FirewallRule | None:
+    """Parse one "### tuple ###" line (the format of ufw's _read_rules()).
+
+    action proto dport dst sport src [dapp sapp] direction [comment=<hex>]
+    e.g. "allow_log tcp 22 0.0.0.0/0 any 192.168.1.0/24 in_wlp2s0 comment=737368"
+    """
+    body, _, comment_hex = line.partition(" comment=")
+    fields = body.split()
+    if len(fields) not in (7, 9):
+        return None
+    action, proto, dport, dst, sport, src = fields[:6]
+    dapp, sapp = (fields[6], fields[7]) if len(fields) == 9 else ("-", "-")
+    route, _, action = action.rpartition(":")
+    action, _, log = action.partition("_")
+    direction, iface_in, iface_out = "in", "", ""
+    for part in fields[-1].split("!"):
+        name, _, iface = part.partition("_")
+        if name not in ("in", "out"):
+            return None
+        direction = name if not iface_in and not iface_out else direction
+        if name == "in":
+            iface_in = iface
+        else:
+            iface_out = iface
+    try:
+        comment = bytes.fromhex(comment_hex.strip()).decode("utf-8", "replace")
+    except ValueError:
+        comment = ""
+    unspace = lambda app: "" if app == "-" else app.replace("%20", " ")  # noqa: E731
+    return FirewallRule(
+        id=hashlib.sha256(f"{int(ipv6)}|{line}".encode()).hexdigest()[:16],
+        action=action, direction=direction, route=route == "route", log=log, protocol=proto,
+        to_address=dst, to_port="" if dport == "any" else dport, to_app=unspace(dapp),
+        from_address=src, from_port="" if sport == "any" else sport, from_app=unspace(sapp),
+        interface_in=iface_in, interface_out=iface_out, ipv6=ipv6, comment=comment,
+    )
+
+
+def parse_rules(dump: dict[str, list[str]]) -> list[FirewallRule]:
+    rules = []
+    for name, ipv6 in (("user.rules", False), ("user6.rules", True)):
+        for line in dump.get(name, []):
+            rule = parse_tuple(line, ipv6)
+            if rule:
+                rules.append(rule)
+    return rules
+
+
+def run_ufw(args: list[str], run: runner.Runner | None = None) -> str:
+    """`ufw <args>` as root, then refresh the rules cache. Returns ufw's output."""
+    raw = run_privileged(root_helpers.command(root_helpers.UFW_THEN_RULES, *args), run)
+    try:
+        data = json.loads(raw)
+        rules = parse_rules(data["rules"])
+        code, out, err = int(data["returncode"]), str(data["stdout"]).strip(), str(data["stderr"]).strip()
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ActionError("Réponse inattendue de l'outil root.") from exc
+    firewall_rules.update(rules)
+    if code != 0:
+        raise ActionError(f"ufw a refusé : {(err or out)[:300]}", code)
+    if "non-existent rule" in out:
+        raise ActionError("Cette règle n'existe plus (déjà supprimée ?) : la liste a été relue.")
+    return out
+
+
+def reveal_firewall_rules(run: runner.Runner | None = None) -> ActionResult:
+    run_ufw([], run)
+    rules, _ = firewall_rules.get()
+    return ActionResult(privileged=True, message=f"{len(rules or [])} règles lues.")
 
 
 def firewall_rule(protocol: Protocol, port: int, block: bool,
@@ -208,7 +350,7 @@ def firewall_rule(protocol: Protocol, port: int, block: bool,
     if not 1 <= port <= 65535 or protocol not in ("tcp", "udp"):
         raise ActionError("Port ou protocole invalide.")
     rule = f"{port}/{protocol}"
-    run_privileged([UFW, "deny", rule] if block else [UFW, "delete", "deny", rule], run)
+    run_ufw(["deny", rule] if block else ["delete", "deny", rule], run)
     if block and not firewall_status().enabled:
         return ActionResult(privileged=True, message=(
             f"Règle ajoutée pour {rule}, mais le pare-feu est désactivé : "
@@ -219,6 +361,142 @@ def firewall_rule(protocol: Protocol, port: int, block: bool,
 
 def firewall_enable(enabled: bool, run: runner.Runner | None = None) -> ActionResult:
     # --force: ufw normally asks "Proceed? (y|n)" on a terminal we do not have.
-    run_privileged([UFW, "--force", "enable"] if enabled else [UFW, "disable"], run)
+    run_ufw(["--force", "enable"] if enabled else ["disable"], run)
     return ActionResult(privileged=True,
                         message="Pare-feu activé." if enabled else "Pare-feu désactivé.")
+
+
+def firewall_default(direction: PolicyDirection, policy: Policy,
+                     run: runner.Runner | None = None) -> ActionResult:
+    """`ufw default deny incoming`: what happens to traffic no rule matches."""
+    if direction not in POLICY_KEYS or policy not in ("allow", "deny", "reject"):
+        raise ActionError("Politique invalide.")
+    run_ufw(["default", policy, direction], run)
+    return ActionResult(privileged=True, message=f"Politique par défaut {direction} : {policy}.")
+
+
+def firewall_logging(level: LogLevel, run: runner.Runner | None = None) -> ActionResult:
+    """`ufw logging low`: blocked packets go to the kernel log ([UFW BLOCK])."""
+    if level not in ("off", "low", "medium", "high", "full"):
+        raise ActionError("Niveau de journalisation invalide.")
+    run_ufw(["logging", level], run)
+    return ActionResult(privileged=True, message=f"Journalisation du pare-feu : {level}.")
+
+
+# ----- user rules: validation -----
+
+def check_ports(value: str) -> str:
+    """"" (no port), "22", "8000:8100" or "80,443"; raises ValueError otherwise."""
+    value = value.strip()
+    if not value:
+        return ""
+    if not PORTS_RE.fullmatch(value):
+        raise ValueError("port : un nombre, une plage 8000:8100 ou une liste 80,443")
+    count = 0
+    for part in value.split(","):
+        bounds = [int(b) for b in part.split(":")]
+        if not all(1 <= b <= 65535 for b in bounds) or bounds != sorted(set(bounds)):
+            raise ValueError(f"port invalide : {part}")
+        count += len(bounds)
+    if count > MAX_PORTS:
+        raise ValueError(f"au plus {MAX_PORTS} ports (une plage compte pour deux)")
+    return value
+
+
+def check_address(value: str) -> str:
+    """"any" or an IPv4/IPv6 address or network, normalized ("10.0.0.5/8" -> "10.0.0.0/8")."""
+    value = value.strip() or "any"
+    if value.lower() == "any":
+        return "any"
+    if "%" in value:  # Python accepts IPv6 scope ids ("fe80::1%eth0"), ufw does not
+        raise ValueError(f"adresse invalide : {value}")
+    try:
+        return str(ipaddress.ip_network(value, strict=False))
+    except ValueError as exc:
+        raise ValueError(f"adresse invalide : {value}") from exc
+
+
+def check_comment(value: str) -> str:
+    value = value.strip()
+    if value and not COMMENT_RE.fullmatch(value):
+        raise ValueError("commentaire : lettres, chiffres, espaces et . _ - seulement (60 max)")
+    return value
+
+
+def _version(address: str) -> int | None:
+    return None if address == "any" else ipaddress.ip_network(address).version
+
+
+def add_firewall_rule(action: RuleAction, direction: Direction, protocol: RuleProtocol,
+                      from_address: str, from_port: str, to_address: str, to_port: str,
+                      log: bool, comment: str,
+                      run: runner.Runner | None = None) -> ActionResult:
+    """`ufw allow in proto tcp from any to any port 22 comment ssh`, field by field."""
+    if action not in ("allow", "deny", "reject", "limit") or direction not in ("in", "out") \
+            or protocol not in ("tcp", "udp", "any"):
+        raise ActionError("Action, direction ou protocole invalide.")
+    try:  # checked by Pydantic already; again here so no caller can skip it
+        src, dst = check_address(from_address), check_address(to_address)
+        sport, dport, comment = check_ports(from_port), check_ports(to_port), check_comment(comment)
+    except ValueError as exc:
+        raise ActionError(str(exc)) from exc
+    if None not in (_version(src), _version(dst)) and _version(src) != _version(dst):
+        raise ActionError("Source et destination doivent être toutes deux IPv4 ou IPv6.")
+    if protocol == "any" and any(c in sport + dport for c in ":,"):
+        raise ActionError("Une plage ou une liste de ports demande tcp ou udp.")
+    args = [action, direction]
+    if log:
+        args.append("log")
+    if protocol != "any":
+        args += ["proto", protocol]
+    args += ["from", src] + (["port", sport] if sport else [])
+    args += ["to", dst] + (["port", dport] if dport else [])
+    if comment:
+        args += ["comment", comment]
+    out = run_ufw(args, run)
+    if "Skipping" in out:
+        return ActionResult(privileged=True, message="Cette règle existe déjà : rien n'a changé.")
+    return ActionResult(privileged=True, message=f"Règle ajoutée : ufw {' '.join(args)}")
+
+
+def delete_args(rule: FirewallRule) -> list[str]:
+    """The `ufw delete …` arguments that match `rule` (rebuilt from the parsed file)."""
+    args = (["route", "delete"] if rule.route else ["delete"]) + [rule.action]
+    if rule.route and (rule.interface_in or rule.interface_out):
+        if rule.interface_in:
+            args += ["in", "on", rule.interface_in]
+        if rule.interface_out:
+            args += ["out", "on", rule.interface_out]
+    else:
+        args.append(rule.direction)
+        iface = rule.interface_in or rule.interface_out
+        if iface:
+            args += ["on", iface]
+    if rule.log:
+        args.append(rule.log)
+    if rule.protocol != "any" and not (rule.from_app or rule.to_app):
+        args += ["proto", rule.protocol]
+    for word, address, port, app in (("from", rule.from_address, rule.from_port, rule.from_app),
+                                     ("to", rule.to_address, rule.to_port, rule.to_app)):
+        args += [word, "any" if address in ANY_ADDRESSES else address]
+        if app:
+            args += ["app", app]
+        elif port:
+            args += ["port", port]
+    return args
+
+
+def delete_firewall_rule(rule_id: str, run: runner.Runner | None = None) -> ActionResult:
+    """Delete a rule by the id the page got from the last root read.
+
+    The page never sends the rule's text: we rebuild the command from the
+    rules root read, and ufw only deletes a rule that matches exactly.
+    """
+    rule = firewall_rules.find(rule_id)
+    if rule is None:
+        raise ActionError("Règle inconnue : relis les règles d'abord.")
+    args = delete_args(rule)
+    run_ufw(args, run)
+    both = rule.from_address in ANY_ADDRESSES and rule.to_address in ANY_ADDRESSES
+    return ActionResult(privileged=True, message=f"Règle supprimée : ufw {' '.join(args)}"
+                        + (" (IPv4 et IPv6)" if both else ""))
