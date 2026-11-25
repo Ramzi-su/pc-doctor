@@ -38,13 +38,31 @@ ws.addEventListener("message", (e) => {
 const send = (method, params = {}) => new Promise((r) => { pending.set(++id, r); ws.send(JSON.stringify({ id, method, params })); });
 const js = async (expression) => (await send("Runtime.evaluate", { expression, awaitPromise: true }))?.result?.value;
 
+// Exact machine identifiers, read from the app's own API, mapped to neutral values.
+// Reading the real values beats guessing them with regexes: nothing is missed.
+const hw = await (await fetch(`${base}/api/hardware`)).json();
+const m = hw.machine ?? {};
+const hwPairs = [
+  [m.product, "Laptop 15"], [m.family, "Laptop"], [m.sku, "SKU-0000"], [m.board, "Board 0000"],
+  [m.bios_version, "1.00"], [m.bios_date, "01/01/2025"],
+  ...(hw.disks ?? []).map((d) => [d.model, d.rotational ? "HDD SATA" : "SSD NVMe"]),
+  ...(hw.batteries ?? []).map((b) => [b.model, "BAT-0000"]),
+  ...(hw.gpus ?? []).map((g) => [g.vbios_version, "00.00.00.00.00"]),
+  ...(hw.usb_devices ?? []).filter((u) => /webcam/i.test(u)).map((u) => [u, "Integrated Webcam"]),
+  ["Hewlett-Packard Company", "OEM"], ["Hewlett-Packard", "OEM"], [m.vendor, "OEM"],
+].filter(([real]) => typeof real === "string" && real.length >= 2)
+  .sort((a, b) => b[0].length - a[0].length); // longest first: the full model before "HP"
+
 // Runs in the page before its own scripts: rewrites identifying text forever after.
 const names = [...new Set([userInfo().username, hostname()])].filter((n) => /^[\w.-]{3,}$/.test(n));
-const MASK = `const NAMES = ${JSON.stringify(names)};` + String.raw`
+const MASK = `const NAMES = ${JSON.stringify(names)}; const HW = ${JSON.stringify(hwPairs)};` + String.raw`
 (() => {
   const ipMap = new Map(), macMap = new Map(), v6Map = new Map();
   const keep4 = (ip) => /^(127\.|0\.0\.0\.0|192\.0\.2\.|1\.1\.1\.1$|255\.)/.test(ip);
+  const esc = (s) => s.replace(/[.*+?^$()|[\]\\{}]/g, "\\$&");
   const rules = [
+    // Whole words only, so "HP" does not touch "PHP".
+    ...HW.map(([real, fake]) => [new RegExp("(?<!\\w)" + esc(real) + "(?!\\w)", "g"), () => fake]),
     ...NAMES.map((n) => [new RegExp(n, "g"), () => "user"]),
     [/\benx[0-9a-f]{12}\b/g, () => "usb0"],
     [/\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b/gi, (m) => m === "00:00:00:00:00:00" || /^02:00:5e:00:53:/i.test(m) ? m
@@ -55,14 +73,16 @@ const MASK = `const NAMES = ${JSON.stringify(names)};` + String.raw`
     [/\b[23][0-9a-f]{3}:[0-9a-f]{1,4}:[0-9a-f:]{3,}/gi, (m) => /^2001:db8/i.test(m) ? m
       : (v6Map.get(m) ?? (v6Map.set(m, "2001:db8::" + (v6Map.size + 1)), v6Map.get(m)))],
   ];
-  // Rows of the capture tooling (Claude, test server, headless Chrome): PIDs set by the script.
+  // Rows of the capture tooling and of private apps: PIDs set by the script,
+  // plus any row naming a private app (e.g. its SUID sandbox file).
   window.__hidePids = new Set();
+  const PRIVATE = /antigravity|proton\.vpn/i;
   const hideRows = () => {
-    for (const tr of document.querySelectorAll("#proc-table tbody tr, #live-procs tbody tr, #ports tbody tr")) {
+    for (const tr of document.querySelectorAll("#proc-table tbody tr, #live-procs tbody tr, #ports tbody tr, #suid tbody tr")) {
       const cells = tr.cells;
       const first = Number(cells[0]?.textContent);
       const owner = Number((tr.closest("#ports") ? cells[5]?.textContent : "").match(/\((\d+)\)/)?.[1]);
-      const hide = window.__hidePids.has(first) || window.__hidePids.has(owner);
+      const hide = window.__hidePids.has(first) || window.__hidePids.has(owner) || PRIVATE.test(tr.textContent);
       if (hide !== (tr.style.display === "none")) tr.style.display = hide ? "none" : "";
     }
   };
@@ -104,11 +124,11 @@ const go = async (hash, wait) => { await js(`location.hash = "${hash}"`); await 
 await theme(false);
 await send("Page.navigate", { url: `${base}/#dashboard` });
 await sleep(4000);
-// Every descendant of a "claude" process is capture tooling: hide those rows.
+// Hide capture tooling ("claude", test server, Chrome) and private apps, with all descendants.
 const hidden = await js(`fetch("/api/processes").then(r => r.json()).then(({ processes }) => {
   const kids = new Map();
   for (const p of processes) kids.set(p.ppid, [...(kids.get(p.ppid) ?? []), p.pid]);
-  const tooling = (p) => p.name === "claude" || /--port 9100|portfolio-profile/.test(p.cmdline ?? "");
+  const tooling = (p) => p.name === "claude" || /--port 9100|portfolio-profile|antigravity|proton\.vpn/i.test(p.cmdline ?? "");
   const out = new Set(processes.filter(tooling).map(p => p.pid));
   const stack = [...out];
   while (stack.length) for (const c of kids.get(stack.pop()) ?? []) if (!out.has(c)) { out.add(c); stack.push(c); }
@@ -128,7 +148,7 @@ await shot("03-hardware-tests", { full: true });
 const refreshHidden = () => js(`fetch("/api/processes").then(r => r.json()).then(({ processes }) => {
   const kids = new Map();
   for (const p of processes) kids.set(p.ppid, [...(kids.get(p.ppid) ?? []), p.pid]);
-  const stack = processes.filter(p => p.name === "claude" || /--port 9100|portfolio-profile/.test(p.cmdline ?? "")).map(p => p.pid);
+  const stack = processes.filter(p => p.name === "claude" || /--port 9100|portfolio-profile|antigravity|proton\.vpn/i.test(p.cmdline ?? "")).map(p => p.pid);
   for (const p of stack) window.__hidePids.add(p);
   while (stack.length) for (const c of kids.get(stack.pop()) ?? []) if (!window.__hidePids.has(c)) { window.__hidePids.add(c); stack.push(c); }
 })`);
